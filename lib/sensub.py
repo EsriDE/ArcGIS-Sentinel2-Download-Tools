@@ -15,23 +15,29 @@
 # limitations under the License.
 
 """Common utilities & helper functions for Sentinel geoprocessing tools."""
-VERSION=20170123
-SCIHUB="https://scihub.copernicus.eu/"; DHUS=SCIHUB+"dhus/"; PRODUCTS=DHUS+"odata/v1/Products('%s')/"
-CHECKSUM,SAFEZIP,SAFEROOT = PRODUCTS+"Checksum/Value/$value", PRODUCTS+"$value", PRODUCTS+"Nodes('%s.SAFE')/"
+VERSION=20170223
+ROWSSTEP=100 # Ultimate DHuS pagination page size limit (rows per page).
+PSD13LEN=78 # Title length of a product that complies with PSD version < 14.
 AWS="http://sentinel-s2-l1c.s3.amazonaws.com/"
 AOIDEMO="7.58179313821144 51.93624645888022 7.642306784531163 51.968128265779484" # Münster.
 PARTIAL=".partial"
-ROWSSTEP=100 # Ultimate DHuS pagination page size limit (rows per page).
-PSD13LEN=78 # Title length of a product that complies with PSD version < 14.
 import os,urllib2,json,datetime,time,re
 import xml.etree.cElementTree as ET
 arcpy = THERE = None # Will be set by the importing module.
 
-def auth (usr, pwd):
-  """Globally install Basic Auth."""
-  pm = urllib2.HTTPPasswordMgrWithDefaultRealm()
-  pm.add_password(None, DHUS, usr, pwd)
+SITE=dict()
+def auth (usr, pwd, dhusAlt=None):
+  """Globally install Basic Auth, and set site specific string constants."""
+  if dhusAlt is None: dhusAlt="SciHub"
+  site,collspec = "https://scihub.copernicus.eu/", "producttype:S2MSI1C"
+  if dhusAlt=="CODE-DE": site,collspec = "https://code-de.org/", "platformname:Sentinel-2"
+  dhus = site+"dhus/"
+  pm=urllib2.HTTPPasswordMgrWithDefaultRealm()
+  pm.add_password(None, dhus, usr, pwd)
   urllib2.install_opener(urllib2.build_opener(urllib2.HTTPBasicAuthHandler(pm)))
+  SITE["SEARCH"] = dhus + "search?format=xml&sortedby=beginposition&order=desc&rows=%d&q=%s" % (ROWSSTEP, collspec)
+  product = dhus+"odata/v1/Products('%s')/"
+  SITE["CHECKSUM"], SITE["SAFEZIP"], SITE["SAFEROOT"] = product+"Checksum/Value/$value", product+"$value", product+"Nodes('%s.SAFE')/"
 
 def sql (pythonSet):
   """Make a SQL string from a python set of UUIDs."""
@@ -41,9 +47,8 @@ def search (sensingMin, sensingMax=None, aoiEnv=AOIDEMO, overlapMin=None, cloudy
   """Formulate & run a catalog query."""
   finds = dict()
   if rowsMax <=0: return finds
-  url = DHUS + "search?format=xml&sortedby=beginposition&order=desc&rows=%d"%ROWSSTEP
   latest = "NOW" if sensingMax is None else sensingMax.isoformat()+"Z" # Z for Zulu, UTC.
-  url += "&q=producttype:S2MSI1C+AND+beginPosition:[%s+TO+%s]" % (sensingMin.isoformat()+"Z", latest)
+  url = SITE["SEARCH"] + "+AND+beginPosition:[%s+TO+%s]"%(sensingMin.isoformat()+"Z", latest)
   spatOp = "Contains" if overlapMin is not None and overlapMin>=100 else "Intersects" # Currently, DHuS OpenSearch (solr) does not implement "Overlaps"!
   XMin,YMin,XMax,YMax = aoiEnv.split()
   rect = "%s+%s,%s+%s,%s+%s,%s+%s,%s+%s" % (XMin,YMin, XMin,YMax, XMax,YMax, XMax,YMin, XMin,YMin)
@@ -83,7 +88,7 @@ def prodTiles (Title, UUID, Sensing, preview=True):
   except urllib2.HTTPError as err:
     if err.code==404: # Why are some product paths not valid? For example: products/2016/7/20/S2A_OPER_PRD_MSIL1C_PDMC_20160805T152827_R051_V20160720T105547_20160720T105547/productInfo.json
       notify("%s: Missing product info on AWS, using DHuS as fallback..."%Title, 1)
-      safeRoot = SAFEROOT%(UUID,Title)
+      safeRoot = SITE["SAFEROOT"]%(UUID,Title)
       url = safeRoot + "Nodes('manifest.safe')/$value"
       info = urllib2.urlopen(url).read()
       GRANULE = r"GRANULE/[^/]+_T(\d{1,2}[A-Z]{3})_[^/]+/%s_DATA/[^.]+%s\.jp2"
@@ -97,9 +102,23 @@ def prodTiles (Title, UUID, Sensing, preview=True):
   return tiles,urlFormat
 
 
+def catch500 (url):
+  """Catch error when (typically) OData resource is non-existent."""
+  rsp,issue,severity = None,None,0
+  try: rsp = urllib2.urlopen(url)
+  except urllib2.HTTPError as err:
+    if err.code==500:
+      issue="cannot reach (non-existent?)"; severity=notify("%s: %s!"%(url,issue), 2)
+    else: raise
+  return rsp,issue,severity
+
 def md5sum (UUID):
-  """Fetch MD5 hash for the product with given UUID."""
-  return urllib2.urlopen(CHECKSUM%UUID).read()
+  """Retrieve MD5 hash for the product with given UUID."""
+  notify("Retrieving MD5 hash...")
+  md5sum=None
+  rsp,issue,severity = catch500(SITE["CHECKSUM"]%UUID)
+  if rsp: md5sum = rsp.read()
+  return md5sum,issue,severity
 
 KiB=1024; MiB=KiB**2
 def download (url, folder=os.environ["TEMP"], filename=None, md5sum=None, unzip=False, unzipName=None, slim=False):
@@ -138,7 +157,8 @@ def download (url, folder=os.environ["TEMP"], filename=None, md5sum=None, unzip=
       issue="already exists"; severity=notify("%s: %s!"%(f, issue), 1)
   if issue: return target,issue,severity
 
-  if not rsp: rsp=urllib2.urlopen(url)
+  if not rsp: rsp,issue,severity = catch500(url)
+  if not rsp: return target,issue,severity
   cl = rsp.headers.getheader("Content-Length")
   size = int(cl) if cl else -1
   if size>-1 and not slim: # Check free disk space:

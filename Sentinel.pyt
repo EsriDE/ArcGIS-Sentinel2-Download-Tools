@@ -15,7 +15,7 @@
 # limitations under the License.
 
 # TODO: Tons of!!!
-VERSION=20170123
+VERSION=20170302
 import arcpy,os,sys
 HERE=os.path.dirname(__file__); sys.path.append(os.path.join(HERE,"lib"))
 try: reload(sensub) # With this, changes to the module's .py file become effective on a toolbox Refresh (F5) from within ArcGIS, i.e. without having to restart ArcGIS.
@@ -24,6 +24,8 @@ sensub.arcpy, sensub.THERE = arcpy, HERE
 ARCMAP = arcpy.sys.executable.endswith("ArcMap.exe")
 DHUSUSR = arcpy.Parameter("DHUSUSR", "DHuS user name", datatype="GPString")
 DHUSPWD = arcpy.Parameter("DHUSPWD", "DHuS password", datatype="GPStringHidden")
+DHUSALT = arcpy.Parameter("DHUSALT", "DHuS alternative site", datatype="GPString", parameterType="Optional")
+DHUSALT.filter.type="ValueList"; DHUSALT.filter.list=["CODE-DE"]
 
 class Toolbox (object):
   def __init__ (self):
@@ -54,7 +56,7 @@ class Search (object):
 
   def getParameterInfo (self): # Why arcpy always calls getParameterInfo multiple times (up to seven times when a tool is called using arcpy.ImportToolbox("P:/ath/to/File.pyt"))?? Instantiation of each toolbox tool class happens even oftener.
     """Prepare parameter definitions."""
-    params=[DHUSUSR,DHUSPWD]
+    params=[DHUSUSR,DHUSPWD,DHUSALT]
     SENSINGMIN = arcpy.Parameter("SENSINGMIN", "Sensing earliest date", datatype="GPDate"); params.append(SENSINGMIN)
     params.append(arcpy.Parameter("SENSINGMAX", "Sensing latest date", datatype="GPDate", parameterType="Optional"))
     AOIENV = arcpy.Parameter("AOIENV", "Area Of Interest (AOI) Envelope in decimal degrees", datatype="GPEnvelope"); params.append(AOIENV)
@@ -188,7 +190,7 @@ class Search (object):
     os.environ["PRODCAT"]=prodCat # Preset for Download tool.
 
     e = params[self.i["AOIENV"]].value; aoiEnv = "%f %f %f %f" % (e.XMin,e.YMin,e.XMax,e.YMax)
-    sensub.auth(params[self.i["DHUSUSR"]].value, params[self.i["DHUSPWD"]].value)
+    sensub.auth(params[self.i["DHUSUSR"]].value, params[self.i["DHUSPWD"]].value, params[self.i["DHUSALT"]].value)
     finds = sensub.search(params[self.i["SENSINGMIN"]].value, params[self.i["SENSINGMAX"]].value, aoiEnv, 1, params[self.i["CLOUDYMAX"]].value, params[self.i["ROWSMAX"]].value) # OVERLAPMIN currently not implemented, set to a fixed dummy value.
     if not finds: return
 
@@ -233,7 +235,7 @@ class Search (object):
         tiles,urlFormat = sensub.prodTiles(Title,UUID,SensingDate)
         tileCount = len(tiles)
         for t,(tileName,previewPath) in enumerate(tiles.items(),1):
-          arcpy.AddMessage("  tile %d/%d..." % (t,tileCount))
+          arcpy.AddMessage("  tile %d/%d (%s)" % (t,tileCount,tileName))
           target,issue,severity = sensub.download(urlFormat%previewPath, tmpDir, "%s.%s.jp2"%(UUID,tileName), slim=True)
           if not issue or issue=="already exists":
             toRemove.add(target); auxPath=target+".aux.xml"
@@ -257,7 +259,7 @@ class Search (object):
           UUID,tileName,sfx = r[1].split(".")
           if finds.has_key(UUID): # Paranoid... maybe there are some relicts from a previous unhandled cancellation/crash?
             Title,SensingDate,CloudCover,Size = finds[UUID]
-            r = [UUID,tileName,Title,SensingDate,CloudCover,Size,when,None,when]
+            r = [UUID, "%s %s"%(tileName,SensingDate.date().isoformat()), Title,SensingDate,CloudCover,Size,when,None,when]
         rows.updateRow(r)
     if ARCMAP: params[self.i["PRODCAT"]].value = prodCat
     #HOWTO "Reload Cache" from arcpy? Is comtypes needed for this?
@@ -294,7 +296,7 @@ class Download (object):
     self.canRunInBackground = False
 
   def getParameterInfo (self):
-    params=[DHUSUSR,DHUSPWD]
+    params=[DHUSUSR,DHUSPWD,DHUSALT]
     params.append(arcpy.Parameter("PRODCAT", "Product catalog where Marked rows denote download", datatype="DERasterCatalog"))
     params.append(arcpy.Parameter("RASTERDIR", "Directory to store downloads", datatype="DEFolder"))
     OPMODE = arcpy.Parameter("OPMODE", "Operation mode", datatype="GPString", parameterType="Optional")
@@ -353,12 +355,12 @@ class Download (object):
       arcpy.AddMessage("Processing Marked item(s)...")
       prodMemo = dict()
       if not opMode["ImgSel"]:
-        dldone = dlskipped = dlfailed = 0
+        dldone = dlskipped = dlfailed = missed = 0
         cartName = os.path.join(rasterDir, datetime.datetime.now().strftime("Cart.%Y-%m-%d_%H.%M.%S.xml"))
         cartPart = cartName+sensub.PARTIAL
         cartFile = open(cartPart,"w")
         sensub.flushline('<?xml version="1.0" encoding="UTF-8" standalone="no"?>\n<metalink xmlns="urn:ietf:params:xml:ns:metalink">', cartFile)
-      sensub.auth(params[self.i["DHUSUSR"]].value, params[self.i["DHUSPWD"]].value)
+      sensub.auth(params[self.i["DHUSUSR"]].value, params[self.i["DHUSPWD"]].value, params[self.i["DHUSALT"]].value)
       for r in rows:
         update = False
         Name,SensingDate,Size,Marked,Downloaded,Title,UUID,MD5 = r
@@ -366,30 +368,34 @@ class Download (object):
           processed,md5sum,issue,severity = (None,MD5,None,0) if not prodMemo.has_key(UUID) else prodMemo.get(UUID)
           if not processed: # Yet unprocessed single-tile package, or first tile occurrence of a multi-tile package (scene) or of a dupes set (should not happen):
             arcpy.AddMessage("# %s, %s (%s)" % (Size, Title, UUID))
-            if not md5sum: md5sum = sensub.md5sum(UUID)
-            m4int = (filename,md5sum,url) = Title+".zip", md5sum, sensub.SAFEZIP%UUID
-            sensub.flushline("  <file name='%s'><hash type='MD5'>%s</hash><url>%s</url></file>" % m4int, cartFile)
-            if opMode["Full"]:
-              target,issue,severity = sensub.download(url, rasterDir, filename, md5sum, unzip, Title+".SAFE")
-              if not issue:
-                dldone += 1
-                if unzip:
-                  if len(Title)<sensub.PSD13LEN: rgb8.append(target) # PSD14 not yet supported by ArcGIS(10.5).
-                  else: demo.append(os.path.join(target,"Multispectral-10m"))
-              elif severity==1:
-                arcpy.AddWarning(" => Skipped."); dlskipped += 1
-              else: dlfailed += 1
+            if not md5sum: md5sum,issue,severity = sensub.md5sum(UUID)
+            if not md5sum:
+              arcpy.AddWarning(" => Missed."); missed += 1
+            else:
+              m4int = (filename,md5sum,url) = Title+".zip", md5sum, sensub.SITE["SAFEZIP"]%UUID
+              sensub.flushline("  <file name='%s'><hash type='MD5'>%s</hash><url>%s</url></file>" % m4int, cartFile)
+              if opMode["Full"]:
+                target,issue,severity = sensub.download(url, rasterDir, filename, md5sum, unzip, Title+".SAFE")
+                if not issue:
+                  dldone += 1
+                  if unzip:
+                    if len(Title)<sensub.PSD13LEN: rgb8.append(target) # PSD14 not yet supported by ArcGIS(10.5).
+                    else: demo.append(os.path.join(target,"Multispectral-10m"))
+                elif severity==1:
+                  arcpy.AddWarning(" => Skipped."); dlskipped += 1
+                else: dlfailed += 1
             processed = datetime.datetime.now()
-          if not MD5:
+          if not MD5 and md5sum:
             r[7]=md5sum; update=True # Cache it to avoid potentially redundant checksum calls.
           if opMode["Full"] and not issue:
             r[4]=processed; update=True
           prodMemo[UUID] = (processed,md5sum,issue,severity)
         elif Marked:
-          arcpy.AddMessage("# %s, %s," % (Title,Name))
+          tileName = Name.split()[0]
+          arcpy.AddMessage("# %s, %s," % (Title,tileName))
           if not prodMemo.has_key(UUID): prodMemo[UUID] = sensub.prodTiles(Title,UUID,SensingDate,False)
           tiles,urlFormat = prodMemo.get(UUID)
-          tileDir = os.path.join(rasterDir, Title, Name)
+          tileDir = os.path.join(rasterDir, Title, tileName)
           if not os.path.exists(tileDir): os.makedirs(tileDir)
           anyImageDownloaded=False
           for n in self.imgNames:
@@ -397,7 +403,7 @@ class Download (object):
               if n=="TCI" and not len(Title)<sensub.PSD13LEN: arcpy.AddWarning("  TCI: not available for older products (PSD<14).")
               else:
                 arcpy.AddMessage("  %s," % n)
-                target,issue,severity = sensub.download(urlFormat % (tiles[Name] % n), tileDir, n+".jp2")
+                target,issue,severity = sensub.download(urlFormat % (tiles[tileName] % n), tileDir, n+".jp2")
                 if not issue:
                   if n=="TCI": rgb8.append(target)
                   anyImageDownloaded=True
@@ -407,8 +413,9 @@ class Download (object):
     if not opMode["ImgSel"]:
       sensub.flushline("</metalink>",cartFile); cartFile.close()
       os.rename(cartPart,cartName); arcpy.AddMessage(cartName)
-    if opMode["Full"]:
-      arcpy.AddMessage("Downloaded %s, Skipped %s, Failed %s" % (dldone,dlskipped,dlfailed))
+      summary = "Missed %s" % missed
+      if opMode["Full"]: summary = "Downloaded %s, Skipped %s, Failed %s, %s" % (dldone,dlskipped,dlfailed, summary)
+      arcpy.AddMessage(summary)
     params[self.i["DEMO"]].value = ";".join(demo)
     params[self.i["RGB8"]].value = ";".join(rgb8)
 
