@@ -1,4 +1,4 @@
-@echo on
+@echo off
 :: Set environment variables for proxy server use, then start the affected process.
 
 set ProxyServer=192.168.3.128
