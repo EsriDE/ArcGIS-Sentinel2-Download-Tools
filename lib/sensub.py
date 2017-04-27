@@ -15,7 +15,7 @@
 # limitations under the License.
 
 """Common utilities & helper functions for Sentinel geoprocessing tools."""
-VERSION=20170223
+VERSION=20170419
 ROWSSTEP=100 # Ultimate DHuS pagination page size limit (rows per page).
 PSD13LEN=78 # Title length of a product that complies with PSD version < 14.
 AWS="http://sentinel-s2-l1c.s3.amazonaws.com/"
@@ -31,17 +31,21 @@ def auth (usr, pwd, dhusAlt=None):
   if dhusAlt is None: dhusAlt="SciHub"
   site,collspec = "https://scihub.copernicus.eu/", "producttype:S2MSI1C"
   if dhusAlt=="CODE-DE": site,collspec = "https://code-de.org/", "platformname:Sentinel-2"
-  dhus = site+"dhus/"
-  pm=urllib2.HTTPPasswordMgrWithDefaultRealm()
-  pm.add_password(None, dhus, usr, pwd)
-  urllib2.install_opener(urllib2.build_opener(urllib2.HTTPBasicAuthHandler(pm)))
-  SITE["SEARCH"] = dhus + "search?format=xml&sortedby=beginposition&order=desc&rows=%d&q=%s" % (ROWSSTEP, collspec)
-  product = dhus+"odata/v1/Products('%s')/"
+  SITE["BASE"] = site+"dhus/"
+#  pm=urllib2.HTTPPasswordMgrWithDefaultRealm()
+#  pm.add_password(None, SITE["BASE"], usr, pwd)
+#  urllib2.install_opener(urllib2.build_opener(urllib2.HTTPBasicAuthHandler(pm)))
+#...does not work transparently in combination with proxy support => workaround: urlOpen().
+  import base64; SITE["AUTH"] = "Basic " + base64.b64encode("%s:%s" % (usr, pwd))
+  SITE["SEARCH"] = SITE["BASE"] + "search?format=xml&sortedby=beginposition&order=desc&rows=%d&q=%s" % (ROWSSTEP, collspec)
+  product = SITE["BASE"] + "odata/v1/Products('%s')/"
   SITE["CHECKSUM"], SITE["SAFEZIP"], SITE["SAFEROOT"] = product+"Checksum/Value/$value", product+"$value", product+"Nodes('%s.SAFE')/"
 
-def sql (pythonSet):
-  """Make a SQL string from a python set of UUIDs."""
-  return re.sub("^set|[u \[\]]", "", str(pythonSet))
+def urlOpen (url):
+  """Work around flawed chain of handlers regarding BasicAuth via Proxy."""
+  req = urllib2.Request(url)
+  if url.startswith(SITE["BASE"]): req.add_header("Authorization", SITE["AUTH"])
+  return urllib2.urlopen(req)
 
 def search (sensingMin, sensingMax=None, aoiEnv=AOIDEMO, overlapMin=None, cloudyMax=None, rowsMax=ROWSSTEP):
   """Formulate & run a catalog query."""
@@ -60,7 +64,7 @@ def search (sensingMin, sensingMax=None, aoiEnv=AOIDEMO, overlapMin=None, cloudy
   offset,rowsBreak = 0,rowsMax
   while offset<rowsBreak: # Next page:
     if offset>0: notify("...offset: %d" % offset)
-    rsp = urllib2.urlopen(url + str(offset))
+    rsp = urlOpen(url + str(offset))
     root=ET.ElementTree(file=rsp).getroot(); ns={"atom":"http://www.w3.org/2005/Atom", "opensearch":"http://a9.com/-/spec/opensearch/1.1/"}
     if offset==0: # First page:
       found = int(root.find("opensearch:totalResults",ns).text)
@@ -90,7 +94,7 @@ def prodTiles (Title, UUID, Sensing, preview=True):
       notify("%s: Missing product info on AWS, using DHuS as fallback..."%Title, 1)
       safeRoot = SITE["SAFEROOT"]%(UUID,Title)
       url = safeRoot + "Nodes('manifest.safe')/$value"
-      info = urllib2.urlopen(url).read()
+      info = urlOpen(url).read()
       GRANULE = r"GRANULE/[^/]+_T(\d{1,2}[A-Z]{3})_[^/]+/%s_DATA/[^.]+%s\.jp2"
       pat = GRANULE%("QI","") if preview else GRANULE%("IMG","_B01")
       for m in re.finditer(pat,info):
@@ -105,7 +109,7 @@ def prodTiles (Title, UUID, Sensing, preview=True):
 def catch500 (url):
   """Catch error when (typically) OData resource is non-existent."""
   rsp,issue,severity = None,None,0
-  try: rsp = urllib2.urlopen(url)
+  try: rsp = urlOpen(url)
   except urllib2.HTTPError as err:
     if err.code==500:
       issue="cannot reach (non-existent?)"; severity=notify("%s: %s!"%(url,issue), 2)
@@ -131,7 +135,7 @@ def download (url, folder=os.environ["TEMP"], filename=None, md5sum=None, unzip=
     return filename,issue,severity
   rsp=None
   if not filename: # As a fallback, check MIME header:
-    rsp = urllib2.urlopen(url)
+    rsp = urlOpen(url)
     cd = rsp.headers.getheader("Content-Disposition")
     if cd:
       import cgi
@@ -241,6 +245,10 @@ def download (url, folder=os.environ["TEMP"], filename=None, md5sum=None, unzip=
         issue="not a zip file"; severity=notify("%s: %s!"%(tmp, issue), 2)
   return target,issue,severity
 
+
+def sql (pythonSet):
+  """Make a SQL string from a python set of UUIDs."""
+  return re.sub("^set|[u \[\]]", "", str(pythonSet))
 
 def flushline (line, file):
   """Ensure that written lines are not getting lost."""
