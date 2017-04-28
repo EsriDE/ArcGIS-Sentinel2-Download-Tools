@@ -1,0 +1,3 @@
+*.pyt eol=crlf
+*.py eol=crlf
+*.bat eol=crlf
