@@ -4,7 +4,7 @@ In addition, picked previews can be opened in separate pup-up windows.")
 ## Purpose
 The purpose is to provide assistance to occasional users to deal with Sentinel data in a local ArcGIS Desktop environment by means of two Python Toolbox tools and common ArcGIS Desktop experience:
 
-1. **Search** Data Hub Services' (DHuS) product catalog for Sentinel-2 products (L1C, or L2A where avaiable) according to given criteria (in particular spatiotemporal constraints and cloud cover limit).  
+1. **Search** Data Hub Services' (DHuS) product catalog for Sentinel-2 products (L1C, or L2A soon) according to given criteria (in particular spatiotemporal constraints and cloud cover limit).  
   The search results are stored in a local product catalog (raster catalog) acting as a controllable cache (for product metadata and previews).  
   ![](doc/Search.png "Search tool results.")
 2. Interactively browse metadata (attribute table) and product previews (by selecting product records); mark desired product records for download.
