@@ -14,7 +14,7 @@ The purpose is to provide assistance to occasional users to deal with Sentinel d
 Upon download success, the respective raster datasets are displayed in ArcMap.
 
 #### Characteristics
-* :construction: Level-2A (L2A) products, avaiable from ESA's Copernicus Open Access Hub ([SciHub DHuS](https://scihub.copernicus.eu/dhus)) since begin of May 2017, will be respected _soon_ (please stay tuned here).  
+* :construction: Level-2A (L2A) products, available from ESA's Copernicus Open Access Hub ([SciHub DHuS](https://scihub.copernicus.eu/dhus)) since begin of May 2017, will be respected _soon_ (please stay tuned here).  
   The _Download_ tool will then display a L2A product by a Group Layer, composed of confidence images for cloud (CLD) and snow/ice (SNW), a natural color composite (TCI), and a scene classification image (SCL), along with appropriate symbology:  
   ![](doc/L2A.jpg "SCL of the upper product on the left,
 CLD+SNW+TCI of the lower product on the right.")
