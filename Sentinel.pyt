@@ -15,17 +15,21 @@
 # limitations under the License.
 
 # TODO: Tons of!!!
-VERSION=20170302
+VERSION=20170727
 import arcpy,os,sys
 HERE=os.path.dirname(__file__); sys.path.append(os.path.join(HERE,"lib"))
 try: reload(sensub) # With this, changes to the module's .py file become effective on a toolbox Refresh (F5) from within ArcGIS, i.e. without having to restart ArcGIS.
 except NameError: import sensub
 sensub.arcpy, sensub.THERE = arcpy, HERE
 ARCMAP = arcpy.sys.executable.endswith("ArcMap.exe")
+if ARCMAP:
+  MXD=arcpy.mapping.MapDocument("CURRENT")
+  sensub.MXD = MXD
 DHUSUSR = arcpy.Parameter("DHUSUSR", "DHuS user name", datatype="GPString")
 DHUSPWD = arcpy.Parameter("DHUSPWD", "DHuS password", datatype="GPStringHidden")
 DHUSALT = arcpy.Parameter("DHUSALT", "DHuS alternative site", datatype="GPString", parameterType="Optional")
 DHUSALT.filter.type="ValueList"; DHUSALT.filter.list=["CODE-DE"]
+
 
 class Toolbox (object):
   def __init__ (self):
@@ -48,15 +52,16 @@ class Search (object):
     self.canRunInBackground = False
     if ARCMAP: # Dispose well-known broken in_memory layers:
       try:
-        mxd=arcpy.mapping.MapDocument("CURRENT")
-        for df in arcpy.mapping.ListDataFrames(mxd):
-          for lyr in arcpy.mapping.ListLayers(mxd, self.CME+"*", df):
+        for df in arcpy.mapping.ListDataFrames(MXD):
+          for lyr in arcpy.mapping.ListLayers(MXD, self.CME+"*", df):
             if lyr.isBroken: arcpy.mapping.RemoveLayer(df, lyr)
       except RuntimeError: pass # "Object: CreateObject cannot open map document"! This happens after having edited the "Item Description..." (enforces to restart ArcGIS)!
 
   def getParameterInfo (self): # Why arcpy always calls getParameterInfo multiple times (up to seven times when a tool is called using arcpy.ImportToolbox("P:/ath/to/File.pyt"))?? Instantiation of each toolbox tool class happens even oftener.
     """Prepare parameter definitions."""
     params=[DHUSUSR,DHUSPWD,DHUSALT]
+    PROCLEVEL = arcpy.Parameter("PROCLEVEL", "Processing level", datatype="GPString")
+    PROCLEVEL.filter.type="ValueList"; PROCLEVEL.filter.list=["1C","2A"]; params.append(PROCLEVEL)
     SENSINGMIN = arcpy.Parameter("SENSINGMIN", "Sensing earliest date", datatype="GPDate"); params.append(SENSINGMIN)
     params.append(arcpy.Parameter("SENSINGMAX", "Sensing latest date", datatype="GPDate", parameterType="Optional"))
     AOIENV = arcpy.Parameter("AOIENV", "Area Of Interest (AOI) Envelope in decimal degrees", datatype="GPEnvelope"); params.append(AOIENV)
@@ -70,14 +75,15 @@ class Search (object):
     FGDB = arcpy.Parameter("FGDB", "File geodatabase holding the search results catalog", datatype="DEWorkspace")
     FGDB.filter.list=["Local Database"]; params.append(FGDB)
     CATNAME = arcpy.Parameter("CATNAME", "Name of the local search results catalog", datatype="GPString"); params.append(CATNAME)
-    OPMERGE = arcpy.Parameter("OPMERGE", "Merge new finds with ones from previous searches.", datatype="GPBoolean", parameterType="Optional"); params.append(OPMERGE)
+    OPMERGE = arcpy.Parameter("OPMERGE", "Merge new finds with ones from previous searches", datatype="GPBoolean", parameterType="Optional"); params.append(OPMERGE)
     ROWSMAX = arcpy.Parameter("ROWSMAX", "Maximum count of search result rows", datatype="GPLong", parameterType="Optional")
     ROWSMAX.filter.type="Range"; ROWSMAX.filter.list=[1,5000]; params.append(ROWSMAX)
-    params.append(arcpy.Parameter("PRODCAT", parameterType="Derived", datatype="DERasterCatalog", symbology=sensub.dep("Product.lyr"), direction="Output")) # Why direction must/can be specified when "Derived" implicitly enforces "Output"??
-#    params.append(arcpy.Parameter("aoiTmp", parameterType="Derived", datatype="DEFeatureClass", symbology=sensub.dep(self.CME+".lyr"), direction="Output"))
+    params.append(arcpy.Parameter("PRODCAT_", datatype="DERasterCatalog", symbology=sensub.dep("Product.lyr"), parameterType="Derived", direction="Output")) # Why direction must/can be specified when "Derived" implicitly enforces "Output"??
+#    params.append(arcpy.Parameter("aoiTmp", datatype="DEFeatureClass", symbology=sensub.dep(self.CME+".lyr"), parameterType="Derived", direction="Output"))
 #    params.append(arcpy.Parameter("debug", "debug", datatype="GPString", parameterType="Optional"))
     # Preset:
     sensub.recall(self, params, ["aoiMap","aoiLayer"])
+    if PROCLEVEL.value is None: PROCLEVEL.value="1C"
     if SENSINGMIN.value is None: SENSINGMIN.value = sensub.dayStart(datetime.date.today() - datetime.timedelta(days=30))
     if AOIENV.value is None: AOIENV.value = sensub.AOIDEMO
     aoiMap.value=False # Paranoid.
@@ -91,6 +97,12 @@ class Search (object):
 
   def updateParameters (self, params):
     """Modify the values and properties of parameters before internal validation is performed. This method is called whenever a parameter has been changed."""
+    DHUSALT,PROCLEVEL = params[self.i["DHUSALT"]], params[self.i["PROCLEVEL"]]
+    if not DHUSALT.hasBeenValidated:
+      if DHUSALT.value=="CODE-DE":
+        PROCLEVEL.value="1C"; PROCLEVEL.enabled=False
+      else: PROCLEVEL.enabled=True
+
     AOIENV,aoiLayer,aoiMap = params[self.i["AOIENV"]], params[self.i["aoiLayer"]], params[self.i["aoiMap"]]
     if not AOIENV.hasBeenValidated:
       aoiLayer.enabled = AOIENV.enabled = True # Why GPEnvelope's widget allows "Clear" when not being enabled??
@@ -98,19 +110,18 @@ class Search (object):
       aoiMap.value = False
     elif not aoiMap.hasBeenValidated:
       if aoiMap.value and ARCMAP:
-        mxd=arcpy.mapping.MapDocument("CURRENT")
-        e = mxd.activeDataFrame.extent
-        pe = sensub.prjExtent(self, e, "aoiMap", "Active data frame")
+        e = MXD.activeDataFrame.extent
+        pe = sensub.projectExtent(self, e, "aoiMap", "Active data frame")
         if pe:
           params[self.i["AOIENV"]].value = pe
-          tmpName = "%s%d" % (self.CME, arcpy.mapping.ListDataFrames(mxd).index(mxd.activeDataFrame))
+          tmpName = "%s%d" % (self.CME, arcpy.mapping.ListDataFrames(MXD).index(MXD.activeDataFrame))
           tmpSource = os.path.join("in_memory",tmpName)
           fresh=False
           if not arcpy.Exists(tmpSource):
             arcpy.CreateFeatureclass_management("in_memory", tmpName, "POLYGON", spatial_reference=self.WGS84)
             fresh=True
-          ll = arcpy.mapping.ListLayers(mxd, tmpName, mxd.activeDataFrame)
-          if not ll: arcpy.mapping.AddLayer(mxd.activeDataFrame, arcpy.mapping.Layer(tmpSource))
+          ll = arcpy.mapping.ListLayers(MXD, tmpName, MXD.activeDataFrame)
+          if not ll: arcpy.mapping.AddLayer(MXD.activeDataFrame, arcpy.mapping.Layer(tmpSource))
           if fresh or not ll: arcpy.ApplySymbologyFromLayer_management(tmpName, sensub.dep(self.CME+".lyr"))
           if not fresh: # Dispose previous CME beforehand:
             with arcpy.da.UpdateCursor(tmpSource,"OID@") as rows:
@@ -124,8 +135,7 @@ class Search (object):
       if aoiLayer.value:
         dismiss=False
         if not aoiLayer.valueAsText.endswith(".lyr") and ARCMAP:
-          mxd=arcpy.mapping.MapDocument("CURRENT")
-          dfLayers = (lyr.name for lyr in arcpy.mapping.ListLayers(mxd, data_frame=mxd.activeDataFrame))
+          dfLayers = (lyr.name for lyr in arcpy.mapping.ListLayers(MXD, data_frame=MXD.activeDataFrame))
           if aoiLayer.valueAsText not in dfLayers:
             self.w["aoiLayer"]="Layer not found in active data frame, nothing copied over."
             dismiss=True
@@ -134,7 +144,7 @@ class Search (object):
             d = arcpy.Describe(aoiLayer.value.dataSource)
             if d.dataType=="FeatureDataset": self.w["aoiLayer"]="FeatureDataset found, nothing copied over."
             else:
-              pe = sensub.prjExtent(self, d.extent, "aoiLayer", "Data source")
+              pe = sensub.projectExtent(self, d.extent, "aoiLayer", "Data source")
               if pe: params[self.i["AOIENV"]].value = pe
           else: self.w["aoiLayer"]="Data source info not found, nothing copied over."
 #        else: aoiLayer.value="" # Silently dismiss.
@@ -187,11 +197,11 @@ class Search (object):
     sensub.memorize(params)
     FGDB,CATNAME = params[self.i["FGDB"]], params[self.i["CATNAME"]]
     prodCat,fresh = os.path.join(FGDB.valueAsText,CATNAME.valueAsText), False
-    os.environ["PRODCAT"]=prodCat # Preset for Download tool.
+    sensub.setEnv("PRODCAT", prodCat) # Preset for Download tool.
 
     e = params[self.i["AOIENV"]].value; aoiEnv = "%f %f %f %f" % (e.XMin,e.YMin,e.XMax,e.YMax)
     sensub.auth(params[self.i["DHUSUSR"]].value, params[self.i["DHUSPWD"]].value, params[self.i["DHUSALT"]].value)
-    finds = sensub.search(params[self.i["SENSINGMIN"]].value, params[self.i["SENSINGMAX"]].value, aoiEnv, 1, params[self.i["CLOUDYMAX"]].value, params[self.i["ROWSMAX"]].value) # OVERLAPMIN currently not implemented, set to a fixed dummy value.
+    finds = sensub.search(params[self.i["PROCLEVEL"]].value, params[self.i["SENSINGMIN"]].value, params[self.i["SENSINGMAX"]].value, aoiEnv, 1, params[self.i["CLOUDYMAX"]].value, params[self.i["ROWSMAX"]].value) # OVERLAPMIN currently not implemented, set to a fixed dummy value.
     if not finds: return
 
     if not arcpy.Exists(prodCat):
@@ -236,9 +246,9 @@ class Search (object):
         tileCount = len(tiles)
         for t,(tileName,previewPath) in enumerate(tiles.items(),1):
           arcpy.AddMessage("  tile %d/%d (%s)" % (t,tileCount,tileName))
-          target,issue,severity = sensub.download(urlFormat%previewPath, tmpDir, "%s.%s.jp2"%(UUID,tileName), slim=True)
+          preview,issue,severity = sensub.download(urlFormat%previewPath, tmpDir, "%s.%s.jp2"%(UUID,tileName), slim=True)
           if not issue or issue=="already exists":
-            toRemove.add(target); auxPath=target+".aux.xml"
+            toRemove.add(preview); auxPath=preview+".aux.xml"
             if not os.path.exists(auxPath):
               with open(auxPath,"w") as aux: aux.write("<PAMDataset><PAMRasterBand band='1'><NoDataValue>0</NoDataValue></PAMRasterBand><PAMRasterBand band='2'><NoDataValue>0</NoDataValue></PAMRasterBand><PAMRasterBand band='3'><NoDataValue>0</NoDataValue></PAMRasterBand></PAMDataset>")
               toRemove.add(auxPath)
@@ -261,7 +271,7 @@ class Search (object):
             Title,SensingDate,CloudCover,Size = finds[UUID]
             r = [UUID, "%s %s"%(tileName,SensingDate.date().isoformat()), Title,SensingDate,CloudCover,Size,when,None,when]
         rows.updateRow(r)
-    if ARCMAP: params[self.i["PRODCAT"]].value = prodCat
+    params[self.i["PRODCAT_"]].value = prodCat
     #HOWTO "Reload Cache" from arcpy? Is comtypes needed for this?
 
 
@@ -284,11 +294,40 @@ class Download (object):
     ("B08","NIR (broad), 842nm(115nm), 10m"),
     ("B8A","Vegetation (red edge), 865nm(20nm), 20m"),
     ("B09","Water vapour, 945nm(20nm), 60m"),
-    ("B10","SWIR (cirrus), 1380nm(30nm), 60m"),
+    ("B10","(L1C-only) SWIR (cirrus), 1380nm(30nm), 60m"),
     ("B11","SWIR (snow/ice/cloud), 1610nm(90nm), 20m"),
     ("B12","SWIR (snow/ice/cloud), 2190nm(180nm), 20m"),
-    ("TCI","Natural color composite (3•8 bit), 10m")])
+    ("TCI","Natural color composite (3•8 bit), 10m"),
+    # L2A-only:
+    ("TCI_20m",None),
+    ("TCI_60m",""),
+    ("CLD","Cloud confidence, 20m"),
+    ("CLD_60m",None),
+    ("SNW","Snow/ice confidence, 20m"),
+    ("SNW_60m",None),
+    ("SCL","Scene Classification, 20m"),
+    ("SCL_60m",None),
+    ("AOT","Aerosol Optical Thickness (at 550nm), 10m"),
+    ("AOT_20m",None),
+    ("AOT_60m",None),
+    ("WVP","Water Vapour, 10m"),
+    ("WVP_20m",None),
+    ("WVP_60m",None),
+    ("VIS","(not documented), 20m"),
+    ("B02_20m",None),
+    ("B02_60m",None),
+    ("B03_20m",None),
+    ("B03_60m",None),
+    ("B04_20m",None),
+    ("B04_60m",None),
+    ("B05_60m",None),
+    ("B06_60m",None),
+    ("B07_60m",None),
+    ("B8A_60m",None),
+    ("B11_60m",None),
+    ("B12_60m",None)])
   imgNames = images.keys()
+  outNames = ("MSIL1C","TCI","SCL","CLD","SNW")
 
   def __init__ (self):
     self.label = "Download Marked packages" # Displayed name.
@@ -302,10 +341,12 @@ class Download (object):
     OPMODE = arcpy.Parameter("OPMODE", "Operation mode", datatype="GPString", parameterType="Optional")
     OPMODE.filter.type="ValueList"; OPMODE.filter.list=self.modes.values(); params.append(OPMODE)
     UNZIP = arcpy.Parameter("UNZIP", "Unzip .zip after download", datatype="GPBoolean", parameterType="Optional"); params.append(UNZIP)
+    catName="Image selection"
     for n,dn in self.images.iteritems():
-      params.append(arcpy.Parameter(n, "%s: %s"%(n,dn), category="Image selection", datatype="GPBoolean", parameterType="Optional"))
-    params.append(arcpy.Parameter("DEMO", parameterType="Derived", datatype="DERasterDataset", multiValue=True, symbology=sensub.dep("Multispectral-10m.lyr"), direction="Output")) # Just for demonstration purposes of this built-in function template.
-    params.append(arcpy.Parameter("RGB8", parameterType="Derived", datatype="DERasterDataset", multiValue=True, symbology=sensub.dep("TCI.lyr"), direction="Output")) # New image option (beginning with PSD14).
+      dspName = n if dn is None else "%s: %s"%(n,dn)
+      params.append(arcpy.Parameter(n, dspName, category=catName, datatype="GPBoolean", parameterType="Optional"))
+      if n=="TCI": catName="L2A-only images"
+    for on in self.outNames: params.append(arcpy.Parameter(on+"_", datatype="DERasterDataset", multiValue=True, symbology=sensub.dep(on+".lyr"), parameterType="Derived", direction="Output"))
     # Preset:
     sensub.recall(self,params)
     if OPMODE.value is None: OPMODE.value=self.modes["CartOnly"]
@@ -316,12 +357,10 @@ class Download (object):
     return params
 
   def updateParameters (self, params):
-    OPMODE,UNZIP = params[self.i["OPMODE"]], params[self.i["UNZIP"]]
+    OPMODE = params[self.i["OPMODE"]] 
     if not OPMODE.hasBeenValidated:
-      if OPMODE.value==self.modes["Full"]: UNZIP.enabled=True
-      else: UNZIP.enabled=False
-      if OPMODE.value==self.modes["ImgSel"]: available=True
-      else: available=False
+      params[self.i["UNZIP"]].enabled = True if OPMODE.value==self.modes["Full"] else False
+      available = True if OPMODE.value==self.modes["ImgSel"] else False
       for n in self.imgNames: params[self.i[n]].enabled=available
 
   def updateMessages (self, params):
@@ -339,14 +378,19 @@ class Download (object):
 
 
   def execute (self, params, messages):
+    if ARCMAP:
+      sym = dict()
+      for lyr in ("Group","TCI","SCL","CLD","SNW"): sym[lyr] = arcpy.mapping.Layer(sensub.dep(lyr+".lyr"))
+      sensub.SYMGRP = sym["Group"]
     sensub.memorize(params)
     prodCat = params[self.i["PRODCAT"]].valueAsText
     catName = os.path.basename(prodCat)
-    os.environ["CATNAME"]=catName; os.environ["FGDB"]=os.path.dirname(prodCat) # Preset for Search tool.
+    sensub.setEnv("CATNAME", catName); sensub.setEnv("FGDB", os.path.dirname(prodCat)) # Preset for Search tool.
     rasterDir = os.path.realpath(params[self.i["RASTERDIR"]].valueAsText)
     m,opMode = params[self.i["OPMODE"]].value, dict()
     for n in self.modes.keys(): opMode[n] = True if m==self.modes[n] else False
-    unzip,demo,rgb8 = params[self.i["UNZIP"]].value, list(), list()
+    unzip,out = params[self.i["UNZIP"]].value, dict()
+    for on in self.outNames: out[on]=list()
 #    cursor = arcpy.da.SearchCursor if opMode["CartOnly"] else arcpy.da.UpdateCursor
     with arcpy.da.UpdateCursor(prodCat, ["Name","SensingDate","Size","Marked","Downloaded","Title","UUID","MD5"], where_clause="UUID IN (SELECT DISTINCT UUID FROM "+catName+" WHERE Marked>0)", sql_clause=(None,"ORDER BY Marked DESC")) as rows:
       if not sensub.hasNext(rows):
@@ -361,9 +405,10 @@ class Download (object):
         cartFile = open(cartPart,"w")
         sensub.flushline('<?xml version="1.0" encoding="UTF-8" standalone="no"?>\n<metalink xmlns="urn:ietf:params:xml:ns:metalink">', cartFile)
       sensub.auth(params[self.i["DHUSUSR"]].value, params[self.i["DHUSPWD"]].value, params[self.i["DHUSALT"]].value)
+      if opMode["Full"]: import re
       for r in rows:
-        update = False
         Name,SensingDate,Size,Marked,Downloaded,Title,UUID,MD5 = r
+        update,L2A = False, sensub.isL2A(Title)
         if not opMode["ImgSel"]:
           processed,md5sum,issue,severity = (None,MD5,None,0) if not prodMemo.has_key(UUID) else prodMemo.get(UUID)
           if not processed: # Yet unprocessed single-tile package, or first tile occurrence of a multi-tile package (scene) or of a dupes set (should not happen):
@@ -375,15 +420,29 @@ class Download (object):
               m4int = (filename,md5sum,url) = Title+".zip", md5sum, sensub.SITE["SAFEZIP"]%UUID
               sensub.flushline("  <file name='%s'><hash type='MD5'>%s</hash><url>%s</url></file>" % m4int, cartFile)
               if opMode["Full"]:
-                target,issue,severity = sensub.download(url, rasterDir, filename, md5sum, unzip, Title+".SAFE")
-                if not issue:
-                  dldone += 1
+                unzipName = Title+".SAFE"
+                outcome,issue,severity = sensub.download(url, rasterDir, filename, md5sum, unzip, unzipName)
+                if not issue or (issue=="already exists" and outcome is not None):
+                  if not issue: dldone += 1
                   if unzip:
-                    if len(Title)<sensub.PSD13LEN: rgb8.append(target) # PSD14 not yet supported by ArcGIS(10.5).
-                    else: demo.append(os.path.join(target,"Multispectral-10m"))
-                elif severity==1:
+                    safeDir,mtdName = outcome; mtdFull=os.path.join(safeDir,mtdName)
+                    if len(Title)==sensub.PSD13LEN or (arcpy.GetInstallInfo()["Version"]>="10.5.1" and not L2A): out["MSIL1C"].append(os.path.join(mtdFull,"Multispectral-10m")) # Built-in function template as part of built-in L1C raster product support.
+                    else: # Workarounds for remaining PSD14-related cases:
+                      with open(mtdFull) as f:
+                        tci = re.search(r"GRANULE/[^/]+/IMG_DATA/(R10m/L2A_)?T\w+_TCI(_10m)?", f.read())
+                        if tci:
+                          relPath = tci.group(0)
+                          if L2A: relPath = relPath.replace("IMG_DATA/R10m","%s",1).replace("TCI_10m","%s",1)
+                          imgFull = os.path.join(safeDir, relPath+".jp2")
+                          if not L2A: out["TCI"].append(imgFull) # PSD14 not supported if ArcGIS version < 10.5.1
+                          else: # L2A not yet supported by ArcGIS(10.5.1):
+                            if ARCMAP:
+                              for n in ("SCL_20m","TCI_10m","SNW_20m","CLD_20m"): sensub.addToGroup(unzipName, sensub.imgPath(imgFull,n), sym[n[:3]])
+                if severity==1:
                   arcpy.AddWarning(" => Skipped."); dlskipped += 1
-                else: dlfailed += 1
+                elif severity>1:
+                  if issue.startswith("cannot reach"): missed += 1
+                  else: dlfailed += 1
             processed = datetime.datetime.now()
           if not MD5 and md5sum:
             r[7]=md5sum; update=True # Cache it to avoid potentially redundant checksum calls.
@@ -393,22 +452,32 @@ class Download (object):
         elif Marked:
           tileName = Name.split()[0]
           arcpy.AddMessage("# %s, %s," % (Title,tileName))
-          if not prodMemo.has_key(UUID): prodMemo[UUID] = sensub.prodTiles(Title,UUID,SensingDate,False)
+          if not prodMemo.has_key(UUID): prodMemo[UUID] = sensub.prodTiles(Title,UUID,SensingDate,False,L2A)
           tiles,urlFormat = prodMemo.get(UUID)
-          tileDir = os.path.join(rasterDir, Title, tileName)
-          if not os.path.exists(tileDir): os.makedirs(tileDir)
-          anyImageDownloaded=False
-          for n in self.imgNames:
-            if params[self.i[n]].value:
-              if n=="TCI" and not len(Title)<sensub.PSD13LEN: arcpy.AddWarning("  TCI: not available for older products (PSD<14).")
-              else:
-                arcpy.AddMessage("  %s," % n)
-                target,issue,severity = sensub.download(urlFormat % (tiles[tileName] % n), tileDir, n+".jp2")
-                if not issue:
-                  if n=="TCI": rgb8.append(target)
-                  anyImageDownloaded=True
-          if anyImageDownloaded:
-            r[4]=datetime.datetime.now(); update=True
+          if urlFormat is None: arcpy.AddWarning(" => Missed.")
+          else:
+            tileDir = os.path.join(rasterDir, Title, tileName)
+            if not os.path.exists(tileDir): os.makedirs(tileDir)
+            any = {"downloaded":False}
+            for on in self.outNames: any[on]=False
+            for n in self.imgNames:
+              if params[self.i[n]].value:
+                i = self.imgNames.index(n)
+                if n=="TCI" and len(Title)==sensub.PSD13LEN: arcpy.AddWarning("  %s: not available for older products (PSD<14)."%n)
+                elif n=="B10" and L2A: pass #arcpy.AddWarning("  %s: not available for L2A products."%n)
+                elif i<14 or L2A:
+                  arcpy.AddMessage("  %s" % n)
+                  pathFormat = tiles[tileName]
+                  imgPath = sensub.imgPath(pathFormat, n, L2A, self.images[n])
+                  if L2A: imgPath=sensub.plain2nodes(imgPath) # Catch-up.
+                  img,issue,severity = sensub.download(urlFormat % imgPath, tileDir, n+".jp2")
+                  if not issue or (issue=="already exists" and img is not None):
+                    for on in self.outNames:
+                      if n.startswith(on) and not any[on]:
+                        out[on].append(img); any[on]=True; break # Highest resolution rules.
+                    if not issue: any["downloaded"]=True
+            if any["downloaded"]:
+              r[4]=datetime.datetime.now(); update=True
         if update: rows.updateRow(r)
     if not opMode["ImgSel"]:
       sensub.flushline("</metalink>",cartFile); cartFile.close()
@@ -416,6 +485,5 @@ class Download (object):
       summary = "Missed %s" % missed
       if opMode["Full"]: summary = "Downloaded %s, Skipped %s, Failed %s, %s" % (dldone,dlskipped,dlfailed, summary)
       arcpy.AddMessage(summary)
-    params[self.i["DEMO"]].value = ";".join(demo)
-    params[self.i["RGB8"]].value = ";".join(rgb8)
+    for on in self.outNames: params[self.i[on+"_"]].value = ";".join(out[on])
 
