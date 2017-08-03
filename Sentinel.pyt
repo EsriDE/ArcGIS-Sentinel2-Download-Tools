@@ -15,7 +15,7 @@
 # limitations under the License.
 
 # TODO: Tons of!!!
-VERSION=20170727
+VERSION=20170803
 import arcpy,os,sys
 HERE=os.path.dirname(__file__); sys.path.append(os.path.join(HERE,"lib"))
 try: reload(sensub) # With this, changes to the module's .py file become effective on a toolbox Refresh (F5) from within ArcGIS, i.e. without having to restart ArcGIS.
@@ -23,8 +23,8 @@ except NameError: import sensub
 sensub.arcpy, sensub.THERE = arcpy, HERE
 ARCMAP = arcpy.sys.executable.endswith("ArcMap.exe")
 if ARCMAP:
-  MXD=arcpy.mapping.MapDocument("CURRENT")
-  sensub.MXD = MXD
+  MXD, CME = arcpy.mapping.MapDocument("CURRENT"), "CopiedMapExtent"
+  sensub.MXD, sensub.CME = MXD, CME
 DHUSUSR = arcpy.Parameter("DHUSUSR", "DHuS user name", datatype="GPString")
 DHUSPWD = arcpy.Parameter("DHUSPWD", "DHuS password", datatype="GPStringHidden")
 DHUSALT = arcpy.Parameter("DHUSALT", "DHuS alternative site", datatype="GPString", parameterType="Optional")
@@ -43,7 +43,6 @@ class Search (object):
   i=dict() # Map parameter name to parameter index; provides 'parameter by name'.
   w=dict() # Forward warning messages from updateParameters to updateMessages. (Is there a better way doing this?)
   WGS84 = arcpy.SpatialReference("WGS 1984")
-  CME = "CopiedMapExtent"
 
   def __init__ (self):
     """Initialize the tool (tool name is the name of the class)."""
@@ -53,7 +52,7 @@ class Search (object):
     if ARCMAP: # Dispose well-known broken in_memory layers:
       try:
         for df in arcpy.mapping.ListDataFrames(MXD):
-          for lyr in arcpy.mapping.ListLayers(MXD, self.CME+"*", df):
+          for lyr in arcpy.mapping.ListLayers(MXD, CME+"*", df):
             if lyr.isBroken: arcpy.mapping.RemoveLayer(df, lyr)
       except RuntimeError: pass # "Object: CreateObject cannot open map document"! This happens after having edited the "Item Description..." (enforces to restart ArcGIS)!
 
@@ -79,7 +78,7 @@ class Search (object):
     ROWSMAX = arcpy.Parameter("ROWSMAX", "Maximum count of search result rows", datatype="GPLong", parameterType="Optional")
     ROWSMAX.filter.type="Range"; ROWSMAX.filter.list=[1,5000]; params.append(ROWSMAX)
     params.append(arcpy.Parameter("PRODCAT_", datatype="DERasterCatalog", symbology=sensub.dep("Product.lyr"), parameterType="Derived", direction="Output")) # Why direction must/can be specified when "Derived" implicitly enforces "Output"??
-#    params.append(arcpy.Parameter("aoiTmp", datatype="DEFeatureClass", symbology=sensub.dep(self.CME+".lyr"), parameterType="Derived", direction="Output"))
+#    params.append(arcpy.Parameter("aoiTmp", datatype="DEFeatureClass", symbology=sensub.dep(CME+".lyr"), parameterType="Derived", direction="Output"))
 #    params.append(arcpy.Parameter("debug", "debug", datatype="GPString", parameterType="Optional"))
     # Preset:
     sensub.recall(self, params, ["aoiMap","aoiLayer"])
@@ -114,15 +113,15 @@ class Search (object):
         pe = sensub.projectExtent(self, e, "aoiMap", "Active data frame")
         if pe:
           params[self.i["AOIENV"]].value = pe
-          tmpName = "%s%d" % (self.CME, arcpy.mapping.ListDataFrames(MXD).index(MXD.activeDataFrame))
+          tmpName = "%s%d" % (CME, arcpy.mapping.ListDataFrames(MXD).index(MXD.activeDataFrame))
           tmpSource = os.path.join("in_memory",tmpName)
           fresh=False
           if not arcpy.Exists(tmpSource):
             arcpy.CreateFeatureclass_management("in_memory", tmpName, "POLYGON", spatial_reference=self.WGS84)
             fresh=True
           ll = arcpy.mapping.ListLayers(MXD, tmpName, MXD.activeDataFrame)
-          if not ll: arcpy.mapping.AddLayer(MXD.activeDataFrame, arcpy.mapping.Layer(tmpSource))
-          if fresh or not ll: arcpy.ApplySymbologyFromLayer_management(tmpName, sensub.dep(self.CME+".lyr"))
+          if not ll: arcpy.mapping.AddLayer(MXD.activeDataFrame, arcpy.mapping.Layer(tmpSource), "TOP") # Most notably: Placed above all group layers.
+          if fresh or not ll: arcpy.ApplySymbologyFromLayer_management(tmpName, sensub.dep(CME+".lyr"))
           if not fresh: # Dispose previous CME beforehand:
             with arcpy.da.UpdateCursor(tmpSource,"OID@") as rows:
               for row in rows: rows.deleteRow()
@@ -437,7 +436,8 @@ class Download (object):
                           if not L2A: out["TCI"].append(imgFull) # PSD14 not supported if ArcGIS version < 10.5.1
                           else: # L2A not yet supported by ArcGIS(10.5.1):
                             if ARCMAP:
-                              for n in ("SCL_20m","TCI_10m","SNW_20m","CLD_20m"): sensub.addToGroup(unzipName, sensub.imgPath(imgFull,n), sym[n[:3]])
+                              refLayer=None
+                              for n in ("SCL_20m","TCI_10m","SNW_20m","CLD_20m"): refLayer=sensub.insertIntoGroup(unzipName, refLayer, sensub.imgPath(imgFull,n), sym[n[:3]])
                 if severity==1:
                   arcpy.AddWarning(" => Skipped."); dlskipped += 1
                 elif severity>1:

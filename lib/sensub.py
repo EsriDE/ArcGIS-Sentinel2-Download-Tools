@@ -15,7 +15,7 @@
 # limitations under the License.
 
 """Common utilities & helper functions for Sentinel geoprocessing tools."""
-VERSION=20170727
+VERSION=20170803
 ROWSSTEP=100 # Ultimate DHuS pagination page size limit (rows per page).
 PSD13LEN=78 # Title length of a product that complies with PSD version < 14.
 AWS="http://sentinel-s2-l1c.s3.amazonaws.com/"
@@ -23,7 +23,8 @@ AOIDEMO="7.58179313821144 51.93624645888022 7.642306784531163 51.968128265779484
 PARTIAL=".partial"
 import os,urllib2,json,datetime,time,re
 import xml.etree.cElementTree as ET
-arcpy = THERE = MXD = SYMGRP = None # Will be set by the importing module.
+arcpy = THERE = MXD = CME = SYMGRP = None # Will be set by the importing module.
+
 
 SITE=dict()
 def auth (usr, pwd, dhusAlt=None):
@@ -350,18 +351,24 @@ def imgPath (format, name, L2A=True, label=None):
   subDir = "QI_DATA" if (name.startswith("CLD") or name.startswith("SNW")) else "IMG_DATA/R"+grdRes
   return format % (subDir,briefName)
 
-def addToGroup (grpName, src, sym, altName=None):
-  """To named group (within active data frame of current map document; if non-existent, add it beforehand), add new layer (if not already existent) with given data source and given symbology layer (and optional alternative layer name)."""
+def insertIntoGroup (grpName, refLayer, src, sym, altName=None):
+  """To named group (within active data frame of current map document; if non-existent, add it beforehand), insert new participant layer (if not already existent) with given data source and given symbology layer (and optional alternative layer name)."""
   srcName = os.path.basename(src)
   lyrName = srcName if altName is None else altName
-  existent = arcpy.mapping.ListLayers(MXD, lyrName, MXD.activeDataFrame)
-  if len(existent)==0:
+  participant = arcpy.mapping.ListLayers(MXD, lyrName, MXD.activeDataFrame)
+  if not participant:
     sym.replaceDataSource(os.path.dirname(src), "NONE", srcName)
     sym.name = lyrName
     gl = arcpy.mapping.ListLayers(MXD, grpName, MXD.activeDataFrame)
-    if len(gl)==0:
+    if not gl:
       SYMGRP.name = grpName
-      arcpy.mapping.AddLayer(MXD.activeDataFrame, SYMGRP)
+      cme = arcpy.mapping.ListLayers(MXD, CME+"*", MXD.activeDataFrame)
+      if cme: arcpy.mapping.InsertLayer(MXD.activeDataFrame, cme[0], SYMGRP, "AFTER") # Place below.
+      else: arcpy.mapping.AddLayer(MXD.activeDataFrame, SYMGRP) # AUTO_ARRANGE.
       gl = arcpy.mapping.ListLayers(MXD, grpName, MXD.activeDataFrame)
-    arcpy.mapping.AddLayerToGroup(MXD.activeDataFrame, gl[0], sym)
+    # Progress bottom-up:
+    if not refLayer: arcpy.mapping.AddLayerToGroup(MXD.activeDataFrame, gl[0], sym, "BOTTOM")
+    else: arcpy.mapping.InsertLayer(MXD.activeDataFrame, refLayer, sym) # Stacked above refLayer.
+    participant = arcpy.mapping.ListLayers(MXD, lyrName, MXD.activeDataFrame)
+  return participant[0]
 
