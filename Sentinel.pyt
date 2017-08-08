@@ -15,7 +15,7 @@
 # limitations under the License.
 
 # TODO: Tons of!!!
-VERSION=20170803
+VERSION=20170808
 import arcpy,os,sys
 HERE=os.path.dirname(__file__); sys.path.append(os.path.join(HERE,"lib"))
 try: reload(sensub) # With this, changes to the module's .py file become effective on a toolbox Refresh (F5) from within ArcGIS, i.e. without having to restart ArcGIS.
@@ -47,7 +47,7 @@ class Search (object):
   def __init__ (self):
     """Initialize the tool (tool name is the name of the class)."""
     self.label = "Search DHuS catalog" # Displayed name.
-    self.description = "Search Data Hub Services' (DHuS) product catalog for Sentinel-2 L1C products according to given criteria (in particular spatiotemporal constraints and cloud cover limit)."
+    self.description = "Search Data Hub Services' (DHuS) product catalog for Sentinel-2 products (L1C, or L2A where available) according to given criteria (in particular spatiotemporal constraints and cloud cover limit)."
     self.canRunInBackground = False
     if ARCMAP: # Dispose well-known broken in_memory layers:
       try:
