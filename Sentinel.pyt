@@ -1,6 +1,6 @@
 ﻿# -*- coding: UTF-8 -*-
 
-# Copyright 2017 Esri Deutschland Group GmbH
+# Copyright 2018 Esri Deutschland Group GmbH
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,7 +15,7 @@
 # limitations under the License.
 
 # TODO: Tons of!!!
-VERSION=20170808
+VERSION=20180129
 import arcpy,os,sys
 HERE=os.path.dirname(__file__); sys.path.append(os.path.join(HERE,"lib"))
 try: reload(sensub) # With this, changes to the module's .py file become effective on a toolbox Refresh (F5) from within ArcGIS, i.e. without having to restart ArcGIS.
@@ -326,7 +326,8 @@ class Download (object):
     ("B11_60m",None),
     ("B12_60m",None)])
   imgNames = images.keys()
-  outNames = ("MSIL1C","TCI","SCL","CLD","SNW")
+  outNames,plainFileBased = ["MSIL1C"], ["TCI1C","TCI","SCL","SNW","CLD"]
+  outNames += plainFileBased
 
   def __init__ (self):
     self.label = "Download Marked packages" # Displayed name.
@@ -377,18 +378,14 @@ class Download (object):
 
 
   def execute (self, params, messages):
-    if ARCMAP:
-      sym = dict()
-      for lyr in ("Group","TCI","SCL","CLD","SNW"): sym[lyr] = arcpy.mapping.Layer(sensub.dep(lyr+".lyr"))
-      sensub.SYMGRP = sym["Group"]
     sensub.memorize(params)
     prodCat = params[self.i["PRODCAT"]].valueAsText
     catName = os.path.basename(prodCat)
     sensub.setEnv("CATNAME", catName); sensub.setEnv("FGDB", os.path.dirname(prodCat)) # Preset for Search tool.
     rasterDir = os.path.realpath(params[self.i["RASTERDIR"]].valueAsText)
     m,opMode = params[self.i["OPMODE"]].value, dict()
-    for n in self.modes.keys(): opMode[n] = True if m==self.modes[n] else False
-    unzip,out = params[self.i["UNZIP"]].value, dict()
+    for k in self.modes.keys(): opMode[k] = True if m==self.modes[k] else False
+    unzip,out,sym = params[self.i["UNZIP"]].value, dict(), dict()
     for on in self.outNames: out[on]=list()
 #    cursor = arcpy.da.SearchCursor if opMode["CartOnly"] else arcpy.da.UpdateCursor
     with arcpy.da.UpdateCursor(prodCat, ["Name","SensingDate","Size","Marked","Downloaded","Title","UUID","MD5"], where_clause="UUID IN (SELECT DISTINCT UUID FROM "+catName+" WHERE Marked>0)", sql_clause=(None,"ORDER BY Marked DESC")) as rows:
@@ -404,10 +401,16 @@ class Download (object):
         cartFile = open(cartPart,"w")
         sensub.flushline('<?xml version="1.0" encoding="UTF-8" standalone="no"?>\n<metalink xmlns="urn:ietf:params:xml:ns:metalink">', cartFile)
       sensub.auth(params[self.i["DHUSUSR"]].value, params[self.i["DHUSPWD"]].value, params[self.i["DHUSALT"]].value)
-      if opMode["Full"]: import re
+      arcVersion = arcpy.GetInstallInfo()["Version"]
+      if opMode["Full"] and unzip:
+        import re
+        if ARCMAP:
+          for ln in ["Group","BOA"]+self.plainFileBased:
+            if arcVersion>="10.6" or ln!="BOA": sym[ln] = arcpy.mapping.Layer(sensub.dep(ln+".lyr"))
+          sensub.SYMGRP = sym["Group"]
       for r in rows:
         Name,SensingDate,Size,Marked,Downloaded,Title,UUID,MD5 = r
-        update,L2A = False, sensub.isL2A(Title)
+        update,L2A,PSD13 = False, sensub.isL2A(Title), len(Title)==78 # Title length of a product that complies with PSD version < 14.
         if not opMode["ImgSel"]:
           processed,md5sum,issue,severity = (None,MD5,None,0) if not prodMemo.has_key(UUID) else prodMemo.get(UUID)
           if not processed: # Yet unprocessed single-tile package, or first tile occurrence of a multi-tile package (scene) or of a dupes set (should not happen):
@@ -419,25 +422,49 @@ class Download (object):
               m4int = (filename,md5sum,url) = Title+".zip", md5sum, sensub.SITE["SAFEZIP"]%UUID
               sensub.flushline("  <file name='%s'><hash type='MD5'>%s</hash><url>%s</url></file>" % m4int, cartFile)
               if opMode["Full"]:
-                unzipName = Title+".SAFE"
-                outcome,issue,severity = sensub.download(url, rasterDir, filename, md5sum, unzip, unzipName)
+                outcome,issue,severity = sensub.download(url, rasterDir, filename, md5sum, unzip, Title+".SAFE")
                 if not issue or (issue=="already exists" and outcome is not None):
                   if not issue: dldone += 1
-                  if unzip:
+                  if unzip: # ILLUSTRATION OF PRESENTATION VARIANTS:
+                    # ( ) = Built-in Function Template
+                    #  +  = Within Group Layer
+                    #  •  = Nonexistent SAFE Package Situation
+                    #
+                    # Y: Product Level
+                    # |__X: ArcGIS Version
+                    # \
+                    #  Z: PSD Version
+                    #
+                    #      2A
+                    #        \
+                    #         •------------•------------•
+                    #         |\           |\           |\
+                    #         | \          | \          | \
+                    #         | TCI+---------TCI+--------(2A)+TCI
+                    #      1C |  |         |  |         |  |
+                    #        \|  |         |  |         |  |
+                    # PSD13-(1C)-|-------(1C)-|-------(1C) |
+                    #          \ |          \ |          \ |
+                    #           \|           \|           \|
+                    #    PSD14--TCI1C-------(1C)---------(1C)
+                    #            |            |            |
+                    #            10.4.1       10.5.1       10.6
+                    #            10.5
                     safeDir,mtdName = outcome; mtdFull=os.path.join(safeDir,mtdName)
-                    if len(Title)==sensub.PSD13LEN or (arcpy.GetInstallInfo()["Version"]>="10.5.1" and not L2A): out["MSIL1C"].append(os.path.join(mtdFull,"Multispectral-10m")) # Built-in function template as part of built-in L1C raster product support.
-                    else: # Workarounds for remaining PSD14-related cases:
+                    if PSD13 or (arcVersion>="10.5.1" and not L2A): out["MSIL1C"].append(os.path.join(mtdFull,"Multispectral-10m")) # Built-in function template as part of built-in L1C raster product support.
+                    else: # Remaining PSD14-related cases:
                       with open(mtdFull) as f:
                         tci = re.search(r"GRANULE/[^/]+/IMG_DATA/(R10m/L2A_)?T\w+_TCI(_10m)?", f.read())
                         if tci:
                           relPath = tci.group(0)
                           if L2A: relPath = relPath.replace("IMG_DATA/R10m","%s",1).replace("TCI_10m","%s",1)
                           imgFull = os.path.join(safeDir, relPath+".jp2")
-                          if not L2A: out["TCI"].append(imgFull) # PSD14 not supported if ArcGIS version < 10.5.1
-                          else: # L2A not yet supported by ArcGIS(10.5.1):
+                          if not L2A: out["TCI1C"].append(imgFull) # PSD14 not supported with ArcGIS version < 10.5.1
+                          else: # Grouping of various L2A layers:
                             if ARCMAP:
-                              refLayer=None
-                              for n in ("SCL_20m","TCI_10m","SNW_20m","CLD_20m"): refLayer=sensub.insertIntoGroup(unzipName, refLayer, sensub.imgPath(imgFull,n), sym[n[:3]])
+                              refLayer,grpName = None, re.sub(".+(L2A_)(.+)_N.+_(T\d{1,2}[A-Z]{3}_).+", r"\1\3\2", Title) # Naming convention similar to L2A .jp2 file names.
+                              if arcVersion>="10.6": refLayer=sensub.insertIntoGroup(grpName, refLayer, os.path.join(mtdFull,"BOA Reflectance-10m"), sym["BOA"], grpName+" BOA 10m") # Incorporate built-in L2A raster product demo.
+                              for n in ("TCI_10m","SCL_20m","SNW_20m","CLD_20m"): refLayer=sensub.insertIntoGroup(grpName, refLayer, sensub.imgPath(imgFull,n), sym[n[:3]])
                 if severity==1:
                   arcpy.AddWarning(" => Skipped."); dlskipped += 1
                 elif severity>1:
@@ -459,22 +486,22 @@ class Download (object):
             tileDir = os.path.join(rasterDir, Title, tileName)
             if not os.path.exists(tileDir): os.makedirs(tileDir)
             any = {"downloaded":False}
-            for on in self.outNames: any[on]=False
+            for on in self.plainFileBased: any[on]=False
             for n in self.imgNames:
               if params[self.i[n]].value:
                 i = self.imgNames.index(n)
-                if n=="TCI" and len(Title)==sensub.PSD13LEN: arcpy.AddWarning("  %s: not available for older products (PSD<14)."%n)
+                if n=="TCI" and PSD13: arcpy.AddWarning("  %s: not available for older products (PSD<14)."%n)
                 elif n=="B10" and L2A: pass #arcpy.AddWarning("  %s: not available for L2A products."%n)
                 elif i<14 or L2A:
                   arcpy.AddMessage("  %s" % n)
                   pathFormat = tiles[tileName]
                   imgPath = sensub.imgPath(pathFormat, n, L2A, self.images[n])
                   if L2A: imgPath=sensub.plain2nodes(imgPath) # Catch-up.
-                  img,issue,severity = sensub.download(urlFormat % imgPath, tileDir, n+".jp2")
-                  if not issue or (issue=="already exists" and img is not None):
-                    for on in self.outNames:
-                      if n.startswith(on) and not any[on]:
-                        out[on].append(img); any[on]=True; break # Highest resolution rules.
+                  imgFull,issue,severity = sensub.download(urlFormat % imgPath, tileDir, n+".jp2")
+                  if not issue or (issue=="already exists" and imgFull is not None):
+                    for on in self.plainFileBased:
+                      if not any[on] and ((not L2A and on=="TCI1C" and n=="TCI") or (L2A and n.startswith(on))):
+                        out[on].append(imgFull); any[on]=True; break # Highest resolution rules.
                     if not issue: any["downloaded"]=True
             if any["downloaded"]:
               r[4]=datetime.datetime.now(); update=True

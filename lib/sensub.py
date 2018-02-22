@@ -1,6 +1,6 @@
 ﻿# -*- coding: UTF-8 -*-
 
-# Copyright 2017 Esri Deutschland Group GmbH
+# Copyright 2018 Esri Deutschland Group GmbH
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,9 +15,8 @@
 # limitations under the License.
 
 """Common utilities & helper functions for Sentinel geoprocessing tools."""
-VERSION=20170803
+VERSION=20180129
 ROWSSTEP=100 # Ultimate DHuS pagination page size limit (rows per page).
-PSD13LEN=78 # Title length of a product that complies with PSD version < 14.
 AWS="http://sentinel-s2-l1c.s3.amazonaws.com/"
 AOIDEMO="7.58179313821144 51.93624645888022 7.642306784531163 51.968128265779484" # Münster.
 PARTIAL=".partial"
@@ -357,7 +356,13 @@ def insertIntoGroup (grpName, refLayer, src, sym, altName=None):
   lyrName = srcName if altName is None else altName
   participant = arcpy.mapping.ListLayers(MXD, lyrName, MXD.activeDataFrame)
   if not participant:
-    sym.replaceDataSource(os.path.dirname(src), "NONE", srcName)
+    if srcName.endswith(".jp2"): sym.replaceDataSource(os.path.dirname(src), "NONE", srcName) # Plain raster file.
+    else: # Why replaceDataSource() does not work with a raster function chain as data source?? Workaround:
+      boa=arcpy.mapping.Layer(src) # Imposes the notorious annoying "Compute statistics and histogram"! How to prevent ArcGIS from performing this useless but time consuming statistics computation?
+      arcpy.mapping.UpdateLayer(MXD.activeDataFrame, boa, sym, True) # With a function chain as source, it must be "Symbology only" -- but then the Display settings from the .lyr file are not respected!
+      boa.contrast=0 # Why ArcGIS imposes this annoying default contrast setting of 10%???
+      sym=boa
+    if lyrName.find("_TCI_")<0: sym.visible=False # Normally controllable by the respective .lyr file ... except for layers with a function chain as data source!
     sym.name = lyrName
     gl = arcpy.mapping.ListLayers(MXD, grpName, MXD.activeDataFrame)
     if not gl:
