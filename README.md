@@ -14,7 +14,10 @@ The purpose is to provide assistance to occasional users to deal with Sentinel d
 Upon download success, the respective raster datasets are displayed in ArcMap.
 
 #### Characteristics
-* :new: ArcGIS 10.6 now provides Level-2A (L2A) function templates with its built-in Sentinel-2 raster product type, whereof the 10 meter Bottom-Of-Atmosphere (BOA) template is added to the L2A Group Layer.
+* :construction: The [operational](https://scihub.copernicus.eu/news/News00305) Level-2A (L2A) product distribution, started on 26 March 2018, will be supported *soon* (please stay tuned).  
+  Then, the *Search* tool transparently merges search results relating to the old Level-2Ap pilot phase collection (that still provides those products that are older than 26 March 2018) with results relating to the new operational Level-2A collection (providing L2A products not older than 26 March 2018).
+* For L2A products with processing baseline number not higher than 02.06 (for example, those from the aforesaid Level-2Ap pilot phase collection), ArcGIS 10.6 provides function templates with its built-in Sentinel-2 raster product type, whereof the 10 meter Bottom-Of-Atmosphere (BOA) template is added to the L2A Group Layer.  
+  L2A products with processing baseline number *higher* than 02.06 are not supported by ArcGIS' Sentinel-2 raster product type, which is why no BOA-template-based layer can be shown in this case.
 * L2A products, available from ESA's Copernicus Open Access Hub ([SciHub DHuS](https://scihub.copernicus.eu/dhus)) since begin of May 2017, are taken into account as an option. The _Download_ tool displays a L2A product by a Group Layer, composed of confidence images for cloud (CLD) and snow/ice (SNW), a scene classification image (SCL), and a natural color composite (TCI, plus BOA where applicable), along with appropriate symbology:  
   ![](doc/L2A.jpg "SCL of the upper product on the left,
 CLD+SNW+BOA of the lower product on the right.")
