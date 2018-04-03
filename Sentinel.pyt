@@ -519,7 +519,6 @@ class Download (object):
                   arcpy.AddMessage("  %s" % n)
                   pathFormat = tiles[tileName]
                   imgPath = sensub.imgPath(pathFormat, n, procBaseline, L2A, self.images[n])
-                  arcpy.AddMessage(imgPath)
                   if L2A: imgPath=sensub.plain2nodes(imgPath) # Catch-up.
                   imgFull,issue,severity = sensub.download(urlFormat % imgPath, tileDir, n+".jp2")
                   if not issue or (issue=="already exists" and imgFull is not None):
