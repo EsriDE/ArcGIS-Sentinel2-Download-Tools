@@ -15,7 +15,7 @@
 # limitations under the License.
 
 # TODO: Tons of!!!
-VERSION=20180129
+VERSION=20180403
 import arcpy,os,sys
 HERE=os.path.dirname(__file__); sys.path.append(os.path.join(HERE,"lib"))
 try: reload(sensub) # With this, changes to the module's .py file become effective on a toolbox Refresh (F5) from within ArcGIS, i.e. without having to restart ArcGIS.
@@ -299,7 +299,7 @@ class Download (object):
     ("TCI","Natural color composite (3•8 bit), 10m"),
     # L2A-only:
     ("TCI_20m",None),
-    ("TCI_60m",""),
+    ("TCI_60m",None),
     ("CLD","Cloud confidence, 20m"),
     ("CLD_60m",None),
     ("SNW","Snow/ice confidence, 20m"),
@@ -312,7 +312,7 @@ class Download (object):
     ("WVP","Water Vapour, 10m"),
     ("WVP_20m",None),
     ("WVP_60m",None),
-    ("VIS","(not documented), 20m"),
+#    ("VIS","(not documented), 20m"), # Extincted with PSD14.5!
     ("B02_20m",None),
     ("B02_60m",None),
     ("B03_20m",None),
@@ -326,6 +326,10 @@ class Download (object):
     ("B11_60m",None),
     ("B12_60m",None)])
   imgNames = images.keys()
+  indexes = collections.OrderedDict([])
+  for n,dn in indexes.iteritems():
+    if dn is None: indexes[n]=n
+  idxNames = indexes.keys(); idxNames.reverse()
   outNames,plainFileBased = ["MSIL1C"], ["TCI1C","TCI","SCL","SNW","CLD"]
   outNames += plainFileBased
 
@@ -346,6 +350,7 @@ class Download (object):
       dspName = n if dn is None else "%s: %s"%(n,dn)
       params.append(arcpy.Parameter(n, dspName, category=catName, datatype="GPBoolean", parameterType="Optional"))
       if n=="TCI": catName="L2A-only images"
+    for n,dn in self.indexes.iteritems(): params.append(arcpy.Parameter(n, dn, category="Water indexes (L2A)", datatype="GPBoolean", parameterType="Optional"))
     for on in self.outNames: params.append(arcpy.Parameter(on+"_", datatype="DERasterDataset", multiValue=True, symbology=sensub.dep(on+".lyr"), parameterType="Derived", direction="Output"))
     # Preset:
     sensub.recall(self,params)
@@ -359,9 +364,11 @@ class Download (object):
   def updateParameters (self, params):
     OPMODE = params[self.i["OPMODE"]] 
     if not OPMODE.hasBeenValidated:
-      params[self.i["UNZIP"]].enabled = True if OPMODE.value==self.modes["Full"] else False
-      available = True if OPMODE.value==self.modes["ImgSel"] else False
-      for n in self.imgNames: params[self.i[n]].enabled=available
+      isFull = True if OPMODE.value==self.modes["Full"] else False
+      params[self.i["UNZIP"]].enabled = True if isFull else False
+      for n in self.idxNames: params[self.i[n]].enabled=isFull
+      isImgSel = True if OPMODE.value==self.modes["ImgSel"] else False
+      for n in self.imgNames: params[self.i[n]].enabled=isImgSel
 
   def updateMessages (self, params):
     RASTERDIR = params[self.i["RASTERDIR"]]
@@ -403,14 +410,16 @@ class Download (object):
       sensub.auth(params[self.i["DHUSUSR"]].value, params[self.i["DHUSPWD"]].value, params[self.i["DHUSALT"]].value)
       arcVersion = arcpy.GetInstallInfo()["Version"]
       if opMode["Full"] and unzip:
-        import re
         if ARCMAP:
-          for ln in ["Group","BOA"]+self.plainFileBased:
+          for ln in ["Group","BOA"]+self.plainFileBased: #,"Gray"
             if arcVersion>="10.6" or ln!="BOA": sym[ln] = arcpy.mapping.Layer(sensub.dep(ln+".lyr"))
           sensub.SYMGRP = sym["Group"]
+#          symIdx = sensub.dep("Index.lyr")
+#          sensub.DUMMY = (symIdx, os.path.dirname(symIdx), "dummy-1010.tif")
+      import re
       for r in rows:
         Name,SensingDate,Size,Marked,Downloaded,Title,UUID,MD5 = r
-        update,L2A,PSD13 = False, sensub.isL2A(Title), len(Title)==78 # Title length of a product that complies with PSD version < 14.
+        update,L2A,procBaseline,PSD13 = False, sensub.isL2A(Title), sensub.baselineNumber(Title), len(Title)==78 # Title length of a product that complies with PSD version < 14.
         if not opMode["ImgSel"]:
           processed,md5sum,issue,severity = (None,MD5,None,0) if not prodMemo.has_key(UUID) else prodMemo.get(UUID)
           if not processed: # Yet unprocessed single-tile package, or first tile occurrence of a multi-tile package (scene) or of a dupes set (should not happen):
@@ -441,20 +450,24 @@ class Download (object):
                     #         |\           |\           |\
                     #         | \          | \          | \
                     #         | TCI+---------TCI+--------(2A)+TCI
-                    #      1C |  |         |  |         |  |
-                    #        \|  |         |  |         |  |
-                    # PSD13-(1C)-|-------(1C)-|-------(1C) |
-                    #          \ |          \ |          \ |
-                    #           \|           \|           \|
-                    #    PSD14--TCI1C-------(1C)---------(1C)
-                    #            |            |            |
-                    #            10.4.1       10.5.1       10.6
-                    #            10.5
+                    #         |  |\        |  |\        |  |\
+                    #      1C |  | \       |  | \       |  | \
+                    #        \|  | TCI+---------TCI+---------TCI+
+                    # PSD13-(1C)-|--|----(1C)-|--|----(1C) |  |
+                    #          \ |  |       \ |  |       \ |  |
+                    #           \|  |        \|  |        \|  |
+                    #    PSD14-TCI1C|-------(1C)-|-------(1C) |
+                    #             \ |          \ |          \ |
+                    #              \|           \|           \|
+                    #       PSD14.5-•------------•------------•
+                    #               |            |            |
+                    #               10.4.1       10.5.1       10.6
+                    #               10.5
                     safeDir,mtdName = outcome; mtdFull=os.path.join(safeDir,mtdName)
                     if PSD13 or (arcVersion>="10.5.1" and not L2A): out["MSIL1C"].append(os.path.join(mtdFull,"Multispectral-10m")) # Built-in function template as part of built-in L1C raster product support.
                     else: # Remaining PSD14-related cases:
                       with open(mtdFull) as f:
-                        tci = re.search(r"GRANULE/[^/]+/IMG_DATA/(R10m/L2A_)?T\w+_TCI(_10m)?", f.read())
+                        tci = re.search(r"GRANULE/[^/]+/IMG_DATA/(R10m/(L2A_)?)?T\w+_TCI(_10m)?", f.read())
                         if tci:
                           relPath = tci.group(0)
                           if L2A: relPath = relPath.replace("IMG_DATA/R10m","%s",1).replace("TCI_10m","%s",1)
@@ -462,9 +475,19 @@ class Download (object):
                           if not L2A: out["TCI1C"].append(imgFull) # PSD14 not supported with ArcGIS version < 10.5.1
                           else: # Grouping of various L2A layers:
                             if ARCMAP:
-                              refLayer,grpName = None, re.sub(".+(L2A_)(.+)_N.+_(T\d{1,2}[A-Z]{3}_).+", r"\1\3\2", Title) # Naming convention similar to L2A .jp2 file names.
-                              if arcVersion>="10.6": refLayer=sensub.insertIntoGroup(grpName, refLayer, os.path.join(mtdFull,"BOA Reflectance-10m"), sym["BOA"], grpName+" BOA 10m") # Incorporate built-in L2A raster product demo.
-                              for n in ("TCI_10m","SCL_20m","SNW_20m","CLD_20m"): refLayer=sensub.insertIntoGroup(grpName, refLayer, sensub.imgPath(imgFull,n), sym[n[:3]])
+                              refLayer,refMain,grpName = None, dict(), re.sub(".+(L2A_)(.+)_N.+_(T\d{1,2}[A-Z]{3}_).+", r"\3\2", Title) # Naming convention similar to L2A .jp2 file names.
+                              if arcVersion>="10.6" and procBaseline<="0206": refLayer=sensub.insertIntoGroup(grpName, refLayer, os.path.join(mtdFull,"BOA Reflectance-10m"), sym["BOA"], "BOA 10m") # Incorporate built-in L2A raster product demo.
+                              for n in ("TCI_10m","SCL_20m","SNW_20m","CLD_20m"):
+                                refLayer = refMain[n] = sensub.insertIntoGroup(grpName, refLayer, sensub.imgPath(imgFull,n,procBaseline), sym[n[:3]])
+#                              refLayer,anyIndex,B = refMain["SCL_20m"], False, dict()
+#                              for bn in ("02","03","04","05","06","07","08","11","12"):
+#                                name = "B"+bn
+#                                B[bn] = sensub.imgPath(imgFull, name, label=self.images[name])
+#                              for n in self.idxNames:
+#                                showIndex = params[self.i[n]].value
+#                                if showIndex: anyIndex=True
+#                                refLayer=sensub.insertIntoGroup(grpName, refLayer, (getattr(sensub,n),B), altName=self.indexes[n], skip = not showIndex)
+#                              if anyIndex: sensub.insertIntoGroup(grpName, refMain["TCI_10m"], B["08"], sym["Gray"]) # For visual (water) index assessment.
                 if severity==1:
                   arcpy.AddWarning(" => Skipped."); dlskipped += 1
                 elif severity>1:
@@ -479,7 +502,7 @@ class Download (object):
         elif Marked:
           tileName = Name.split()[0]
           arcpy.AddMessage("# %s, %s," % (Title,tileName))
-          if not prodMemo.has_key(UUID): prodMemo[UUID] = sensub.prodTiles(Title,UUID,SensingDate,False,L2A)
+          if not prodMemo.has_key(UUID): prodMemo[UUID] = sensub.prodTiles(Title,UUID,SensingDate,False,L2A,procBaseline)
           tiles,urlFormat = prodMemo.get(UUID)
           if urlFormat is None: arcpy.AddWarning(" => Missed.")
           else:
@@ -495,7 +518,8 @@ class Download (object):
                 elif i<14 or L2A:
                   arcpy.AddMessage("  %s" % n)
                   pathFormat = tiles[tileName]
-                  imgPath = sensub.imgPath(pathFormat, n, L2A, self.images[n])
+                  imgPath = sensub.imgPath(pathFormat, n, procBaseline, L2A, self.images[n])
+                  arcpy.AddMessage(imgPath)
                   if L2A: imgPath=sensub.plain2nodes(imgPath) # Catch-up.
                   imgFull,issue,severity = sensub.download(urlFormat % imgPath, tileDir, n+".jp2")
                   if not issue or (issue=="already exists" and imgFull is not None):

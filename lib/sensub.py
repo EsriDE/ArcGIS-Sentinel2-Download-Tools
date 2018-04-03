@@ -15,21 +15,21 @@
 # limitations under the License.
 
 """Common utilities & helper functions for Sentinel geoprocessing tools."""
-VERSION=20180302
+VERSION=20180403
 ROWSSTEP=100 # Ultimate DHuS pagination page size limit (rows per page).
 AWS="http://sentinel-s2-l1c.s3.amazonaws.com/"
 AOIDEMO="7.58179313821144 51.93624645888022 7.642306784531163 51.968128265779484" # Münster.
 PARTIAL=".partial"
 import os,urllib2,json,datetime,time,re
 import xml.etree.cElementTree as ET
-arcpy = THERE = MXD = CME = SYMGRP = None # Will be set by the importing module.
+arcpy = THERE = MXD = CME = SYMGRP = DUMMY = None # Will be set by the importing module.
 
 
 SITE=dict()
 def auth (usr, pwd, dhusAlt=None):
   """Globally install Basic Auth, and set site specific string constants."""
   SITE["NAME"] = dhusAlt if dhusAlt is not None else "SciHub"
-  site,collspec = "https://scihub.copernicus.eu/", "producttype:S2MSI%s"
+  site,collspec = "https://scihub.copernicus.eu/", "(producttype:S2MSI%s)"
   if SITE["NAME"]=="CODE-DE": site,collspec = "https://code-de.org/", "platformname:Sentinel-2"
   SITE["BASE"] = site+"dhus/"
 #  pm=urllib2.HTTPPasswordMgrWithDefaultRealm()
@@ -51,7 +51,7 @@ def search (procLevel, sensingMin, sensingMax=None, aoiEnv=AOIDEMO, overlapMin=N
   """Formulate & run a catalog query."""
   finds = dict()
   if rowsMax <=0: return finds
-  if procLevel=="2A": procLevel="2Ap" # Currently, the 2A query parameter at SciHub carries a tentative "p" like "pilot".
+  if procLevel=="2A": procLevel="2Ap+OR+producttype:S2MSI2A" # 2Ap pilot collection (holding products dated before 2018-03-26), plus the 2A operative collection (products from 2018-03-26 onwards).
   url = SITE["SEARCH"] % procLevel if SITE["NAME"]!="CODE-DE" else SITE["SEARCH"]
   latest = "NOW" if sensingMax is None else sensingMax.isoformat()+"Z" # Z for Zulu, UTC.
   url += "+AND+beginPosition:[%s+TO+%s]"%(sensingMin.isoformat()+"Z", latest)
@@ -76,7 +76,7 @@ def search (procLevel, sensingMin, sensingMax=None, aoiEnv=AOIDEMO, overlapMin=N
       notify(txt)
     for e in root.iterfind("atom:entry",ns):
       if len(finds)>=rowsBreak: break
-      sensingZulu = e.find("atom:date[@name='beginposition']",ns).text[:19] # With PSD version >=14, date string has millis appended.
+      sensingZulu = e.find("atom:date[@name='beginposition']",ns).text[:19] # With PSD version >=14, the date string has millis appended.
       cloudy = float(e.find("atom:double[@name='cloudcoverpercentage']",ns).text)
       finds[e.find("atom:id",ns).text] = (e.find("atom:title",ns).text, datetime.datetime.strptime(sensingZulu, "%Y-%m-%dT%H:%M:%S"), cloudy, e.find("atom:str[@name='size']",ns).text)
     offset += ROWSSTEP
@@ -86,36 +86,42 @@ def isL2A (name):
   """Check if name belongs to a L2A product."""
   return True if name.find("L2A_")>0 else False
 
+def baselineNumber (Title):
+  """Extract the processing baseline number from the given product title."""
+  return re.sub(r".+_N(\d{4})_.+", r"\1", Title)
+
 def plain2nodes (path):
   """Convert whole plain path to DHuS-specific Nodes path."""
   return re.sub("([^/]+)", r"Nodes('\1')", path)
 
-def useDHuS (Title, UUID, preview=False, L2A=True):
+def useDHuS (Title, UUID, preview, L2A, procBaseline):
   """Provide prodTiles using DHuS."""
-  tiles,urlFormat = dict(),None
-  safeRoot = SITE["SAFEROOT"]%(UUID,Title)
-  url = safeRoot + "Nodes('manifest.safe')/$value" # L1C manifest, even if a L2A product is given!
+  tiles,safeRoot = dict(), SITE["SAFEROOT"]%(UUID,Title)
+  url = safeRoot + "Nodes('manifest.safe')/$value" # Regarding any pilot phase L2A product (<="0206"), this is still the L1C manifest!
   rsp,issue,severity = catch500(url)
   if rsp:
     info = rsp.read()
     GRANULE = r"GRANULE/[^/]+_T(\d{1,2}[A-Z]{3})_[^/]+/%s_DATA/[^.]+%s\.jp2"
-    pat = GRANULE%("QI","") if preview else GRANULE%("IMG","_B01")
+    pat = GRANULE%("QI","_PVI") if preview else GRANULE%("IMG","_B02(_10m)?")
     for m in re.finditer(pat,info):
       path = m.group()
       if L2A:
-        path = path.replace("L1C_","L2A_",1)
-        if not preview: path = path.replace("IMG_DATA/","%s/L2A_")
-      if not preview: path = path.replace("_B01","_%s")
+        prefix=""
+        if procBaseline<="0206": path,prefix = path.replace("L1C_","L2A_",1), "L2A_" # Pilot phase specific.
+        if not preview: path = re.sub("IMG_DATA/(R10m/)?", "%s/"+prefix, path)
+      if not preview: path = re.sub("_B02(_10m)?", "_%s", path)
       if not (not preview and L2A): path = plain2nodes(path) # Else caught up at a downstream stage (because of multiple preparatory interim interpolations).
       tiles[m.group(1)] = path
-    urlFormat = safeRoot+"%s/$value"
-  return tiles,urlFormat
+  return tiles, safeRoot+"%s/$value"
 
-def prodTiles (Title, UUID, Sensing, preview=True, L2A=None):
+def prodTiles (Title, UUID, Sensing, preview=True, L2A=None, procBaseline=None):
   """Resolve product's tile(s) image path(s)."""
-  # Currently, a L2A product doesn't come with a properly(!) georeferenced BOA preview, therefore the L1C (TOA) preview must still be used until further notice.
   if L2A is None: L2A=isL2A(Title)
-  if not preview and L2A: return useDHuS(Title, UUID) # Currently, AWS does not provide any L2A images.
+  if procBaseline is None: procBaseline=baselineNumber(Title)
+  if L2A:
+    if not preview: return useDHuS(Title, UUID, preview, L2A, procBaseline) # Currently, AWS does not provide any L2A images.
+    elif procBaseline>"0206": return useDHuS(Title, UUID, preview, L2A, procBaseline) # Now provides a proper BOA preview.
+    # Any pilot phase L2A product (<="0206") doesn't come with a properly(!) georeferenced BOA preview, therefore the corresponding L1C (TOA) preview must then be used.
   try:
     url = "%sproducts/%d/%d/%d/%s/productInfo.json" % (AWS, Sensing.year,Sensing.month,Sensing.day, Title.replace("L2A_","L1C_",1))
     info = json.load(urllib2.urlopen(url))
@@ -126,7 +132,7 @@ def prodTiles (Title, UUID, Sensing, preview=True, L2A=None):
   except urllib2.HTTPError as err:
     if err.code==404: # Why are some product paths not valid? For example: products/2016/7/20/S2A_OPER_PRD_MSIL1C_PDMC_20160805T152827_R051_V20160720T105547_20160720T105547/productInfo.json
       notify("%s: Missing product info on AWS, using DHuS as fallback..."%Title, 1)
-      tiles,urlFormat = useDHuS(Title, UUID, preview, L2A)
+      tiles,urlFormat = useDHuS(Title, UUID, preview, L2A, procBaseline)
     else: raise
   return tiles,urlFormat
 
@@ -328,7 +334,7 @@ def dayStart (origin):
   return datetime.datetime(origin.year, origin.month, origin.day)
 
 def enforceDateOnly (param):
-  """Validate GPDate very generally ."""
+  """Validate GPDate very generally."""
   # Is there any GPDate parameter option to enforce 'Date only' in advance, i.e. to disable 'Date and Time' and 'Time only'??
   # See also https://geonet.esri.com/thread/100190
   #   "Is there a way to limit the Date date type to Date only ie limit the Calendar date format radial buttons?"
@@ -342,23 +348,35 @@ def projectExtent (tool, extent, name, origin):
   else: return str(extent.projectAs(tool.WGS84))
 
 
-def imgPath (format, name, L2A=True, label=None):
+def imgPath (format, name, procBaseline=None, L2A=True, label=None):
   """Interpolate a path format to a name-dependent path."""
   if not L2A: return format % name
   grdRes = name[-3:] if len(name)>3 else label[-3:]
   briefName = name if len(name)>3 else "%s_%s" % (name,grdRes)
-  subDir = "QI_DATA" if (name.startswith("CLD") or name.startswith("SNW")) else "IMG_DATA/R"+grdRes
+  subDir = "IMG_DATA/R"+grdRes
+  if name.startswith("CLD") or name.startswith("SNW"):
+    subDir = "QI_DATA"
+    if procBaseline>"0206": format,briefName = os.path.dirname(format)+"/MSK_%s.jp2", briefName.replace("_","PRB_") # Completely different now.
   return format % (subDir,briefName)
 
-def insertIntoGroup (grpName, refLayer, src, sym, altName=None):
+def insertIntoGroup (grpName, refLayer, src, sym=None, altName=None, skip=False):
   """To named group (within active data frame of current map document; if non-existent, add it beforehand), insert new participant layer (if not already existent) with given data source and given symbology layer (and optional alternative layer name)."""
-  workspacePath,datasetName = os.path.dirname(src), os.path.basename(src)
-  lyrName = datasetName if altName is None else altName
+  lyrName,workspacePath,datasetName,plain = None,None,None,False
+  if sym is not None: # ...in contrast to a script-generated function chain layer (see below).
+    workspacePath,datasetName = os.path.dirname(src), os.path.basename(src)
+    lyrName,plain = datasetName, datasetName.endswith(".jp2")
+    if plain:
+      lyrName = lyrName.replace("L2A_","")[:-4] # Strip off uninteresting prefix and suffix.
+      if lyrName.startswith("MSK_"): lyrName = grpName + lyrName.replace("MSK_"," ").replace("PRB_"," ") # Make it unique.
+  if altName is not None: lyrName = "%s %s"%(grpName,altName)
   participant = arcpy.mapping.ListLayers(MXD, lyrName, MXD.activeDataFrame)
+  if skip: return refLayer if not participant else participant[0]
   if not participant:
-    if not datasetName.endswith(".jp2"): # Part of raster product (in contrast to a plain raster file):
-      workspacePath,datasetName = os.path.dirname(workspacePath), os.path.join(os.path.basename(workspacePath),datasetName)
-    sym.replaceDataSource(workspacePath, "RASTER_WORKSPACE", datasetName)
+    if sym is not None:
+      if not plain: # Part of raster product (in contrast to a plain raster file):
+        workspacePath,datasetName = os.path.dirname(workspacePath), os.path.join(os.path.basename(workspacePath),datasetName)
+      sym.replaceDataSource(workspacePath, "RASTER_WORKSPACE", datasetName)
+    else: sym = src[0](src[1])
     if lyrName.find("_TCI_")<0: sym.visible=False # Alternatively controllable/controlled by the respective .lyr file.
     sym.name = lyrName
     gl = arcpy.mapping.ListLayers(MXD, grpName, MXD.activeDataFrame)
