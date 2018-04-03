@@ -96,9 +96,9 @@ class Search (object):
 
   def updateParameters (self, params):
     """Modify the values and properties of parameters before internal validation is performed. This method is called whenever a parameter has been changed."""
-    DHUSALT,PROCLEVEL = params[self.i["DHUSALT"]], params[self.i["PROCLEVEL"]]
+    dhusAlt,PROCLEVEL = params[self.i["DHUSALT"]].value, params[self.i["PROCLEVEL"]]
     if not DHUSALT.hasBeenValidated:
-      if DHUSALT.value=="CODE-DE":
+      if dhusAlt=="CODE-DE":
         PROCLEVEL.value="1C"; PROCLEVEL.enabled=False
       else: PROCLEVEL.enabled=True
 
@@ -407,7 +407,8 @@ class Download (object):
         cartPart = cartName+sensub.PARTIAL
         cartFile = open(cartPart,"w")
         sensub.flushline('<?xml version="1.0" encoding="UTF-8" standalone="no"?>\n<metalink xmlns="urn:ietf:params:xml:ns:metalink">', cartFile)
-      sensub.auth(params[self.i["DHUSUSR"]].value, params[self.i["DHUSPWD"]].value, params[self.i["DHUSALT"]].value)
+      dhusAlt = params[self.i["DHUSALT"]].value
+      sensub.auth(params[self.i["DHUSUSR"]].value, params[self.i["DHUSPWD"]].value, dhusAlt)
       arcVersion = arcpy.GetInstallInfo()["Version"]
       if opMode["Full"] and unzip:
         if ARCMAP:
@@ -419,7 +420,10 @@ class Download (object):
       import re
       for r in rows:
         Name,SensingDate,Size,Marked,Downloaded,Title,UUID,MD5 = r
-        update,L2A,procBaseline,PSD13 = False, sensub.isL2A(Title), sensub.baselineNumber(Title), len(Title)==78 # Title length of a product that complies with PSD version < 14.
+        L2A = sensub.isL2A(Title)
+        if L2A and dhusAlt=="CODE-DE":
+          arcpy.AddWarning("# %s: CODE-DE does not provide any L2A products!"%Title); continue
+        update,procBaseline,PSD13 = False, sensub.baselineNumber(Title), len(Title)==78 # Title length of a product that complies with PSD version < 14.
         if not opMode["ImgSel"]:
           processed,md5sum,issue,severity = (None,MD5,None,0) if not prodMemo.has_key(UUID) else prodMemo.get(UUID)
           if not processed: # Yet unprocessed single-tile package, or first tile occurrence of a multi-tile package (scene) or of a dupes set (should not happen):
