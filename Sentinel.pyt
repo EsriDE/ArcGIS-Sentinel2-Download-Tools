@@ -1,6 +1,6 @@
 ﻿# -*- coding: UTF-8 -*-
 
-# Copyright 2018 Esri Deutschland Group GmbH
+# Copyright 2018 Esri Deutschland GmbH
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,12 +15,12 @@
 # limitations under the License.
 
 # TODO: Tons of!!!
-VERSION=20180403
+VERSION=20180622
 import arcpy,os,sys
 HERE=os.path.dirname(__file__); sys.path.append(os.path.join(HERE,"lib"))
 try: reload(sensub) # With this, changes to the module's .py file become effective on a toolbox Refresh (F5) from within ArcGIS, i.e. without having to restart ArcGIS.
 except NameError: import sensub
-sensub.arcpy, sensub.THERE = arcpy, HERE
+sensub.arcpy, sensub.THERE, sensub.SYMDIR = arcpy, HERE, os.path.join(HERE,"lyr")
 ARCMAP = arcpy.sys.executable.endswith("ArcMap.exe")
 if ARCMAP:
   MXD, CME = arcpy.mapping.MapDocument("CURRENT"), "CopiedMapExtent"
@@ -29,7 +29,6 @@ DHUSUSR = arcpy.Parameter("DHUSUSR", "DHuS user name", datatype="GPString")
 DHUSPWD = arcpy.Parameter("DHUSPWD", "DHuS password", datatype="GPStringHidden")
 DHUSALT = arcpy.Parameter("DHUSALT", "DHuS alternative site", datatype="GPString", parameterType="Optional")
 DHUSALT.filter.type="ValueList"; DHUSALT.filter.list=["CODE-DE"]
-
 
 class Toolbox (object):
   def __init__ (self):
@@ -41,7 +40,7 @@ class Toolbox (object):
 class Search (object):
   """WHERE does this python docstring appear? In ArcCatalog? Elsewhere??"""
   i=dict() # Map parameter name to parameter index; provides 'parameter by name'.
-  w=dict() # Forward warning messages from updateParameters to updateMessages. (Is there a better way doing this?)
+  w=dict() # Forward warning messages from updateParameters to updateMessages. (Is there a better way to accomplish this?)
   WGS84 = arcpy.SpatialReference("WGS 1984")
 
   def __init__ (self):
@@ -282,6 +281,28 @@ class Download (object):
     ("CartOnly", "Cart-only (no raster data)"),
     ("Full", "Full product (cart in parallel)"),
     ("ImgSel", "Image selection (bare raster)")]) # Provide displayName (label) by mode name.
+  probs = collections.OrderedDict([("CLD","Cloud"), ("SNW", "Snow/Ice")])
+  prbNames = probs.keys()
+  indices = collections.OrderedDict([
+    ("NDWI","NDWI(McFeeters)*"),
+    ("MNDWI","*"),
+    ("nNDVI","-NDVI*"),
+    ("nNDVI_GREEN","-NDVI-GREEN*"),
+    ("SWI",None),
+    ("WRI","*"),
+    ("NWIgreen","NWI(green)*"),
+    ("NWIblue","NWI(blue)*"),
+    ("MBWI",None),
+    ("WI2015","*"),
+    ("AWEInsh","*"),
+    ("AWEIsh","*"),
+    ("SBM2m3_6p2m8p6m11p6m12p2", u"SBM(2•3—6²•8⁶•11⁶•12²)")]) #•⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻—₀₁₂₃₄₅₆₇₈₉⋅Πρᵢ↑xᵢ
+  idxFilterable = list()
+  for n,dn in indices.iteritems():
+    if dn is None: indices[n]=n
+    elif dn=="*": indices[n]=n+"*"
+    if indices[n].endswith("*"): idxFilterable.append(n)
+  idxNames = indices.keys(); idxNames.reverse()
   images = collections.OrderedDict([
     ("B01","Coastal aerosol, 443nm(20nm), 60m"),
     ("B02","Blue, 490nm(65nm), 10m"),
@@ -326,12 +347,16 @@ class Download (object):
     ("B11_60m",None),
     ("B12_60m",None)])
   imgNames = images.keys()
-  indexes = collections.OrderedDict([])
-  for n,dn in indexes.iteritems():
-    if dn is None: indexes[n]=n
-  idxNames = indexes.keys(); idxNames.reverse()
   outNames,plainFileBased = ["MSIL1C"], ["TCI1C","TCI","SCL","SNW","CLD"]
   outNames += plainFileBased
+  arcVersion, saEnabled = arcpy.GetInstallInfo()["Version"], False
+  bmfUtility = True if arcVersion>="10.5" else False # With lower arcVersion, the expression parser of BandArithmeticFunction is too picky.
+  if ARCMAP:
+    try:
+      arcpy.sa.Int(1) # Is there a better way to check whether sa is enabled (not to be confused with "available")?
+      saEnabled = True
+    except RuntimeError as err:
+      if not "ERROR 000824" in err.message: raise
 
   def __init__ (self):
     self.label = "Download Marked packages" # Displayed name.
@@ -345,30 +370,49 @@ class Download (object):
     OPMODE = arcpy.Parameter("OPMODE", "Operation mode", datatype="GPString", parameterType="Optional")
     OPMODE.filter.type="ValueList"; OPMODE.filter.list=self.modes.values(); params.append(OPMODE)
     UNZIP = arcpy.Parameter("UNZIP", "Unzip .zip after download", datatype="GPBoolean", parameterType="Optional"); params.append(UNZIP)
+    catName="  L2A additions (masks, filters, index selection)"
+    for n,dn in self.probs.iteritems():
+      params.append(arcpy.Parameter(n+"MSK", "Create %s mask layer (according to threshold)"%dn, category=catName, datatype="GPBoolean", parameterType="Optional"))
+      params.append(arcpy.Parameter(n+"FLT", "Apply %s filter to selected filterable* indices (according to threshold)"%dn, category=catName, datatype="GPBoolean", parameterType="Optional"))
+      threshold = arcpy.Parameter(n+"THR", "%s threshold (probability percentage)"%dn, category=catName, datatype="GPLong", parameterType="Optional")
+      threshold.filter.type="Range"; threshold.filter.list=[1,100]; params.append(threshold)
+    for n,dn in self.indices.iteritems(): params.append(arcpy.Parameter(n, dn, category=catName, datatype="GPBoolean", parameterType="Optional"))
     catName="Image selection"
     for n,dn in self.images.iteritems():
       dspName = n if dn is None else "%s: %s"%(n,dn)
       params.append(arcpy.Parameter(n, dspName, category=catName, datatype="GPBoolean", parameterType="Optional"))
       if n=="TCI": catName="L2A-only images"
-    for n,dn in self.indexes.iteritems(): params.append(arcpy.Parameter(n, dn, category="Water indexes (L2A)", datatype="GPBoolean", parameterType="Optional"))
     for on in self.outNames: params.append(arcpy.Parameter(on+"_", datatype="DERasterDataset", multiValue=True, symbology=sensub.dep(on+".lyr"), parameterType="Derived", direction="Output"))
     # Preset:
     sensub.recall(self,params)
     if OPMODE.value is None: OPMODE.value=self.modes["CartOnly"]
     if UNZIP.value is None: UNZIP.value=True
-    for n in ["TCI"]: #"B04","B03","B02"
+    if params[self.i["CLDTHR"]].value is None: params[self.i["CLDTHR"]].value=40
+    if params[self.i["SNWTHR"]].value is None: params[self.i["SNWTHR"]].value=1
+    for n in ["TCI"]: #"B04","B03","B02","NDWI"
       I = params[self.i[n]]
       if I.value is None: I.value=True
     return params
 
+
   def updateParameters (self, params):
     OPMODE = params[self.i["OPMODE"]] 
+    isFull = True if OPMODE.value==self.modes["Full"] else False
     if not OPMODE.hasBeenValidated:
-      isFull = True if OPMODE.value==self.modes["Full"] else False
       params[self.i["UNZIP"]].enabled = True if isFull else False
-      for n in self.idxNames: params[self.i[n]].enabled=isFull
+      for n in "CLDMSK","SNWMSK": params[self.i[n]].enabled = isFull and self.saEnabled
+      for n in "CLDFLT","SNWFLT": params[self.i[n]].enabled = isFull and self.saEnabled and self.bmfUtility
+      for n in self.idxNames: params[self.i[n]].enabled = isFull and self.bmfUtility
       isImgSel = True if OPMODE.value==self.modes["ImgSel"] else False
       for n in self.imgNames: params[self.i[n]].enabled=isImgSel
+
+    for n in self.prbNames:
+      mskORflt=False
+      for o in "MSK","FLT":
+        p = params[self.i[n+o]]
+        mskORflt = mskORflt or (p.value and p.enabled)
+      params[self.i[n+"THR"]].enabled = mskORflt and isFull
+
 
   def updateMessages (self, params):
     RASTERDIR = params[self.i["RASTERDIR"]]
@@ -376,12 +420,12 @@ class Download (object):
       rp,MAXLEN = os.path.realpath(RASTERDIR.valueAsText), 11
       if len(rp)>MAXLEN: RASTERDIR.setErrorMessage("%s: Path too long (max. %d characters, incl. drive letter and dir. sep.)." % (rp,MAXLEN))
 
-    OPMODE = params[self.i["OPMODE"]]
-    if OPMODE.value==self.modes["ImgSel"]:
-      anySelected=False
-      for n in self.imgNames:
-        if params[self.i[n]].value: anySelected=True
-      if not anySelected: OPMODE.setErrorMessage("Image selection is empty (see below), please select at least one image.")
+    OPMODE,errMsg = params[self.i["OPMODE"]], "%s is empty (see list below), please select at least one of them."
+    if OPMODE.value==self.modes["ImgSel"] and not sensub.anySelected(self,params,self.imgNames): OPMODE.setErrorMessage(errMsg%"Image selection")
+    elif OPMODE.value==self.modes["Full"] and not sensub.anySelected(self,params,self.idxFilterable):
+      for n in self.prbNames:
+        FLT = params[self.i[n+"FLT"]]
+        if FLT.value: FLT.setErrorMessage(errMsg%"Selection of filterable* indices")
 
 
   def execute (self, params, messages):
@@ -392,152 +436,166 @@ class Download (object):
     rasterDir = os.path.realpath(params[self.i["RASTERDIR"]].valueAsText)
     m,opMode = params[self.i["OPMODE"]].value, dict()
     for k in self.modes.keys(): opMode[k] = True if m==self.modes[k] else False
-    unzip,out,sym = params[self.i["UNZIP"]].value, dict(), dict()
+    unzip,out,sym, msk,flt,thr,briefName,symName = params[self.i["UNZIP"]].value, dict(), dict(), dict(),dict(),dict(),dict(),dict()
+    for n,dn in self.probs.iteritems(): msk[n],flt[n],thr[n],briefName[n],symName[n] = params[self.i[n+"MSK"]].value, params[self.i[n+"FLT"]].value, params[self.i[n+"THR"]].value, n+"_20m", dn.replace("/","")
     for on in self.outNames: out[on]=list()
-#    cursor = arcpy.da.SearchCursor if opMode["CartOnly"] else arcpy.da.UpdateCursor
-    with arcpy.da.UpdateCursor(prodCat, ["Name","SensingDate","Size","Marked","Downloaded","Title","UUID","MD5"], where_clause="UUID IN (SELECT DISTINCT UUID FROM "+catName+" WHERE Marked>0)", sql_clause=(None,"ORDER BY Marked DESC")) as rows:
-      if not sensub.hasNext(rows):
-        arcpy.AddWarning("Nothing Marked for download!")
-        return
-      arcpy.AddMessage("Processing Marked item(s)...")
-      prodMemo = dict()
-      if not opMode["ImgSel"]:
-        dldone = dlskipped = dlfailed = missed = 0
-        cartName = os.path.join(rasterDir, datetime.datetime.now().strftime("Cart.%Y-%m-%d_%H.%M.%S.xml"))
-        cartPart = cartName+sensub.PARTIAL
-        cartFile = open(cartPart,"w")
-        sensub.flushline('<?xml version="1.0" encoding="UTF-8" standalone="no"?>\n<metalink xmlns="urn:ietf:params:xml:ns:metalink">', cartFile)
-      dhusAlt = params[self.i["DHUSALT"]].value
-      sensub.auth(params[self.i["DHUSUSR"]].value, params[self.i["DHUSPWD"]].value, dhusAlt)
-      arcVersion = arcpy.GetInstallInfo()["Version"]
-      if opMode["Full"] and unzip:
-        if ARCMAP:
-          for ln in ["Group","BOA"]+self.plainFileBased: #,"Gray"
-            if arcVersion>="10.6" or ln!="BOA": sym[ln] = arcpy.mapping.Layer(sensub.dep(ln+".lyr"))
-          sensub.SYMGRP = sym["Group"]
-#          symIdx = sensub.dep("Index.lyr")
-#          sensub.DUMMY = (symIdx, os.path.dirname(symIdx), "dummy-1010.tif")
-      import re
-      for r in rows:
-        Name,SensingDate,Size,Marked,Downloaded,Title,UUID,MD5 = r
-        L2A = sensub.isL2A(Title)
-        if L2A and dhusAlt=="CODE-DE":
-          arcpy.AddWarning("# %s: CODE-DE does not provide any L2A products!"%Title); continue
-        update,procBaseline,PSD13 = False, sensub.baselineNumber(Title), len(Title)==78 # Title length of a product that complies with PSD version < 14.
+    toRestore = list()
+    try:
+#      cursor = arcpy.da.SearchCursor if opMode["CartOnly"] else arcpy.da.UpdateCursor
+      with arcpy.da.UpdateCursor(prodCat, ["Name","SensingDate","Size","Marked","Downloaded","Title","UUID","MD5"], where_clause="UUID IN (SELECT DISTINCT UUID FROM "+catName+" WHERE Marked>0)", sql_clause=(None,"ORDER BY Marked DESC")) as rows:
+        if not sensub.hasNext(rows):
+          arcpy.AddWarning("Nothing Marked for download!")
+          return
+        arcpy.AddMessage("Processing Marked item(s)...")
+        prodMemo = dict()
         if not opMode["ImgSel"]:
-          processed,md5sum,issue,severity = (None,MD5,None,0) if not prodMemo.has_key(UUID) else prodMemo.get(UUID)
-          if not processed: # Yet unprocessed single-tile package, or first tile occurrence of a multi-tile package (scene) or of a dupes set (should not happen):
-            arcpy.AddMessage("# %s, %s (%s)" % (Size, Title, UUID))
-            if not md5sum: md5sum,issue,severity = sensub.md5sum(UUID)
-            if not md5sum:
-              arcpy.AddWarning(" => Missed."); missed += 1
+          dldone = dlskipped = dlfailed = missed = 0
+          cartName = os.path.join(rasterDir, datetime.datetime.now().strftime("Cart.%Y-%m-%d_%H.%M.%S.xml"))
+          cartPart = cartName+sensub.PARTIAL
+          cartFile = open(cartPart,"w")
+          sensub.flushline('<?xml version="1.0" encoding="UTF-8" standalone="no"?>\n<metalink xmlns="urn:ietf:params:xml:ns:metalink">', cartFile)
+        dhusAlt = params[self.i["DHUSALT"]].value
+        sensub.auth(params[self.i["DHUSUSR"]].value, params[self.i["DHUSPWD"]].value, dhusAlt)
+        if opMode["Full"] and unzip:
+          if ARCMAP:
+            for ln in ["Group","BOA","Gray"]+self.plainFileBased:
+              if self.arcVersion>="10.6" or ln!="BOA": sym[ln] = arcpy.mapping.Layer(sensub.dep(ln+".lyr"))
+            sensub.SYMGRP,symPath, = sym["Group"], dict()
+            for sn in ["Index"]+symName.values(): symPath[sn]=sensub.dep(sn+".lyr")
+            sensub.SYMRFT = symPath,"dummy-11.tif" # For RFT-based layers.
+            for lyr in arcpy.mapping.ListLayers(MXD, data_frame=MXD.activeDataFrame):
+              if lyr.visible and lyr.longName.find("\\")<0: # Only top-level needed.
+                lyr.visible=False; toRestore.append(lyr) # Hack to minimize ArcMap's annoying intermediate drawing performances. Why does ArcMap always perform redrawing even if the added layer (or its holding group layer) has visible=False (which means that any redrawing is totally useless anyway)? And why is there no arcpy.mapping.PauseDrawing() available?
+        import re
+        for r in rows:
+          Name,SensingDate,Size,Marked,Downloaded,Title,UUID,MD5 = r
+          L2A = sensub.isL2A(Title)
+          if L2A and dhusAlt=="CODE-DE":
+            arcpy.AddWarning("# %s: CODE-DE does not provide any L2A products!"%Title); continue
+          update,procBaseline,PSD13 = False, sensub.baselineNumber(Title), len(Title)==78 # Title length of a product that complies with PSD version < 14.
+          if not opMode["ImgSel"]:
+            processed,md5sum,issue,severity = (None,MD5,None,0) if not prodMemo.has_key(UUID) else prodMemo.get(UUID)
+            if not processed: # Yet unprocessed single-tile package, or first tile occurrence of a multi-tile package (scene) or of a dupes set (should not happen):
+              arcpy.AddMessage("# %s, %s (%s)" % (Size, Title, UUID))
+              if not md5sum: md5sum,issue,severity = sensub.md5sum(UUID)
+              if not md5sum:
+                arcpy.AddWarning(" => Missed."); missed += 1
+              else:
+                m4int = filename,md5sum,url = Title+".zip", md5sum, sensub.SITE["SAFEZIP"]%UUID
+                sensub.flushline("  <file name='%s'><hash type='MD5'>%s</hash><url>%s</url></file>" % m4int, cartFile)
+                if opMode["Full"]:
+                  outcome,issue,severity = sensub.download(url, rasterDir, filename, md5sum, unzip, Title+".SAFE")
+                  if not issue or (issue=="already exists" and outcome is not None):
+                    if not issue: dldone += 1
+                    if unzip: # ILLUSTRATION OF PRESENTATION VARIANTS:
+                      # ( ) = Built-in Function Template
+                      #  +  = Within Group Layer
+                      #  •  = Nonexistent SAFE Package Situation
+                      #
+                      # Y: Product Level
+                      # |__X: ArcGIS Version
+                      # \
+                      #  Z: PSD Version
+                      #
+                      #      2A
+                      #        \
+                      #         •------------•------------•
+                      #         |\           |\           |\
+                      #         | \          | \          | \
+                      #         | TCI+---------TCI+--------(2A)+TCI
+                      #         |  |\        |  |\        |  |\
+                      #      1C |  | \       |  | \       |  | \
+                      #        \|  | TCI+---------TCI+---------TCI+
+                      # PSD13-(1C)-|--|----(1C)-|--|----(1C) |  |
+                      #          \ |  |       \ |  |       \ |  |
+                      #           \|  |        \|  |        \|  |
+                      #    PSD14-TCI1C|-------(1C)-|-------(1C) |
+                      #             \ |          \ |          \ |
+                      #              \|           \|           \|
+                      #       PSD14.5-•------------•------------•
+                      #               |            |            |
+                      #               10.4.1       10.5.1       10.6
+                      #               10.5
+                      safeDir,mtdName = outcome; mtdFull=os.path.join(safeDir,mtdName)
+                      if PSD13 or (self.arcVersion>="10.5.1" and not L2A): out["MSIL1C"].append(os.path.join(mtdFull,"Multispectral-10m")) # Built-in function template as part of built-in L1C raster product support.
+                      else: # Remaining PSD14-related cases:
+                        with open(mtdFull) as f:
+                          tci = re.search(r"GRANULE/[^/]+/IMG_DATA/(R10m/(L2A_)?)?T\w+_TCI(_10m)?", f.read())
+                          if tci:
+                            relPath = tci.group(0)
+                            if L2A: relPath = relPath.replace("IMG_DATA/R10m","%s",1).replace("TCI_10m","%s",1)
+                            imgFull = os.path.join(safeDir, relPath+".jp2")
+                            if not L2A: out["TCI1C"].append(imgFull) # PSD14 not supported with ArcGIS version < 10.5.1
+                            else: # Grouping of various L2A layers:
+                              if ARCMAP:
+                                X,reference,refMain,grpName = dict(), (None,None), dict(), re.sub(".+(L2A_)(.+)_N.+_(T\d{1,2}[A-Z]{3}_).+", r"\3\2", Title) # Naming convention similar to L2A .jp2 file names.
+                                if self.arcVersion>="10.6" and procBaseline<="0206": reference = sensub.insertIntoGroup(os.path.join(mtdFull,"BOA Reflectance-10m"), reference, grpName, sym["BOA"], "BOA 10m") # Incorporate built-in L2A raster product demo.
+                                for n in "TCI_10m","SCL_20m","SNW_20m","CLD_20m":
+                                  X[n] = sensub.imgPath(imgFull,n,procBaseline)
+                                  reference = refMain[n] = sensub.insertIntoGroup(X[n], reference, grpName, sym[n[:3]])
+                                # For the following, ignore self.saEnabled, since a currently missing Spatial Analyst license can be (re-)enabled by the user at any time:
+                                for n,dn in self.probs.iteritems():
+                                  if msk[n]: sensub.insertIntoGroup(("mask",(X[briefName[n]],thr[n],symName[n])), refMain[briefName[n]], grpName, altName=dn)
+                                if self.bmfUtility:
+                                  reference,anyIndex,B = refMain["SCL_20m"], False, dict()
+                                  for bn in "02","03","04","05","06","07","08","11","12":
+                                    name = "B"+bn
+                                    B[bn] = sensub.imgPath(imgFull, name, label=self.images[name])
+                                  for n in self.idxNames:
+                                    showIndex = params[self.i[n]].value
+                                    if showIndex: anyIndex=True
+                                    reference = sensub.insertIntoGroup((n,(B,X,(flt,thr))), reference, grpName, altName=self.indices[n], skip = not showIndex)
+                                  if anyIndex: sensub.insertIntoGroup(B["08"], refMain["TCI_10m"], grpName, sym["Gray"]) # For visual (water) index assessment.
+                  if severity==1:
+                    arcpy.AddWarning(" => Skipped."); dlskipped += 1
+                  elif severity>1:
+                    if issue.startswith("cannot reach"): missed += 1
+                    else: dlfailed += 1
+              processed = datetime.datetime.now()
+            if not MD5 and md5sum:
+              r[7]=md5sum; update=True # Cache it to avoid potentially redundant checksum calls.
+            if opMode["Full"] and not issue:
+              r[4]=processed; update=True
+            prodMemo[UUID] = processed,md5sum,issue,severity
+          elif Marked:
+            tileName = Name.split()[0]
+            arcpy.AddMessage("# %s, %s," % (Title,tileName))
+            if not prodMemo.has_key(UUID): prodMemo[UUID] = sensub.prodTiles(Title,UUID,SensingDate,False,L2A,procBaseline)
+            tiles,urlFormat = prodMemo.get(UUID)
+            if urlFormat is None: arcpy.AddWarning(" => Missed.")
             else:
-              m4int = (filename,md5sum,url) = Title+".zip", md5sum, sensub.SITE["SAFEZIP"]%UUID
-              sensub.flushline("  <file name='%s'><hash type='MD5'>%s</hash><url>%s</url></file>" % m4int, cartFile)
-              if opMode["Full"]:
-                outcome,issue,severity = sensub.download(url, rasterDir, filename, md5sum, unzip, Title+".SAFE")
-                if not issue or (issue=="already exists" and outcome is not None):
-                  if not issue: dldone += 1
-                  if unzip: # ILLUSTRATION OF PRESENTATION VARIANTS:
-                    # ( ) = Built-in Function Template
-                    #  +  = Within Group Layer
-                    #  •  = Nonexistent SAFE Package Situation
-                    #
-                    # Y: Product Level
-                    # |__X: ArcGIS Version
-                    # \
-                    #  Z: PSD Version
-                    #
-                    #      2A
-                    #        \
-                    #         •------------•------------•
-                    #         |\           |\           |\
-                    #         | \          | \          | \
-                    #         | TCI+---------TCI+--------(2A)+TCI
-                    #         |  |\        |  |\        |  |\
-                    #      1C |  | \       |  | \       |  | \
-                    #        \|  | TCI+---------TCI+---------TCI+
-                    # PSD13-(1C)-|--|----(1C)-|--|----(1C) |  |
-                    #          \ |  |       \ |  |       \ |  |
-                    #           \|  |        \|  |        \|  |
-                    #    PSD14-TCI1C|-------(1C)-|-------(1C) |
-                    #             \ |          \ |          \ |
-                    #              \|           \|           \|
-                    #       PSD14.5-•------------•------------•
-                    #               |            |            |
-                    #               10.4.1       10.5.1       10.6
-                    #               10.5
-                    safeDir,mtdName = outcome; mtdFull=os.path.join(safeDir,mtdName)
-                    if PSD13 or (arcVersion>="10.5.1" and not L2A): out["MSIL1C"].append(os.path.join(mtdFull,"Multispectral-10m")) # Built-in function template as part of built-in L1C raster product support.
-                    else: # Remaining PSD14-related cases:
-                      with open(mtdFull) as f:
-                        tci = re.search(r"GRANULE/[^/]+/IMG_DATA/(R10m/(L2A_)?)?T\w+_TCI(_10m)?", f.read())
-                        if tci:
-                          relPath = tci.group(0)
-                          if L2A: relPath = relPath.replace("IMG_DATA/R10m","%s",1).replace("TCI_10m","%s",1)
-                          imgFull = os.path.join(safeDir, relPath+".jp2")
-                          if not L2A: out["TCI1C"].append(imgFull) # PSD14 not supported with ArcGIS version < 10.5.1
-                          else: # Grouping of various L2A layers:
-                            if ARCMAP:
-                              refLayer,refMain,grpName = None, dict(), re.sub(".+(L2A_)(.+)_N.+_(T\d{1,2}[A-Z]{3}_).+", r"\3\2", Title) # Naming convention similar to L2A .jp2 file names.
-                              if arcVersion>="10.6" and procBaseline<="0206": refLayer=sensub.insertIntoGroup(grpName, refLayer, os.path.join(mtdFull,"BOA Reflectance-10m"), sym["BOA"], "BOA 10m") # Incorporate built-in L2A raster product demo.
-                              for n in ("TCI_10m","SCL_20m","SNW_20m","CLD_20m"):
-                                refLayer = refMain[n] = sensub.insertIntoGroup(grpName, refLayer, sensub.imgPath(imgFull,n,procBaseline), sym[n[:3]])
-#                              refLayer,anyIndex,B = refMain["SCL_20m"], False, dict()
-#                              for bn in ("02","03","04","05","06","07","08","11","12"):
-#                                name = "B"+bn
-#                                B[bn] = sensub.imgPath(imgFull, name, label=self.images[name])
-#                              for n in self.idxNames:
-#                                showIndex = params[self.i[n]].value
-#                                if showIndex: anyIndex=True
-#                                refLayer=sensub.insertIntoGroup(grpName, refLayer, (getattr(sensub,n),B), altName=self.indexes[n], skip = not showIndex)
-#                              if anyIndex: sensub.insertIntoGroup(grpName, refMain["TCI_10m"], B["08"], sym["Gray"]) # For visual (water) index assessment.
-                if severity==1:
-                  arcpy.AddWarning(" => Skipped."); dlskipped += 1
-                elif severity>1:
-                  if issue.startswith("cannot reach"): missed += 1
-                  else: dlfailed += 1
-            processed = datetime.datetime.now()
-          if not MD5 and md5sum:
-            r[7]=md5sum; update=True # Cache it to avoid potentially redundant checksum calls.
-          if opMode["Full"] and not issue:
-            r[4]=processed; update=True
-          prodMemo[UUID] = (processed,md5sum,issue,severity)
-        elif Marked:
-          tileName = Name.split()[0]
-          arcpy.AddMessage("# %s, %s," % (Title,tileName))
-          if not prodMemo.has_key(UUID): prodMemo[UUID] = sensub.prodTiles(Title,UUID,SensingDate,False,L2A,procBaseline)
-          tiles,urlFormat = prodMemo.get(UUID)
-          if urlFormat is None: arcpy.AddWarning(" => Missed.")
-          else:
-            tileDir = os.path.join(rasterDir, Title, tileName)
-            if not os.path.exists(tileDir): os.makedirs(tileDir)
-            any = {"downloaded":False}
-            for on in self.plainFileBased: any[on]=False
-            for n in self.imgNames:
-              if params[self.i[n]].value:
-                i = self.imgNames.index(n)
-                if n=="TCI" and PSD13: arcpy.AddWarning("  %s: not available for older products (PSD<14)."%n)
-                elif n=="B10" and L2A: pass #arcpy.AddWarning("  %s: not available for L2A products."%n)
-                elif i<14 or L2A:
-                  arcpy.AddMessage("  %s" % n)
-                  pathFormat = tiles[tileName]
-                  imgPath = sensub.imgPath(pathFormat, n, procBaseline, L2A, self.images[n])
-                  if L2A: imgPath=sensub.plain2nodes(imgPath) # Catch-up.
-                  imgFull,issue,severity = sensub.download(urlFormat % imgPath, tileDir, n+".jp2")
-                  if not issue or (issue=="already exists" and imgFull is not None):
-                    for on in self.plainFileBased:
-                      if not any[on] and ((not L2A and on=="TCI1C" and n=="TCI") or (L2A and n.startswith(on))):
-                        out[on].append(imgFull); any[on]=True; break # Highest resolution rules.
-                    if not issue: any["downloaded"]=True
-            if any["downloaded"]:
-              r[4]=datetime.datetime.now(); update=True
-        if update: rows.updateRow(r)
-    if not opMode["ImgSel"]:
-      sensub.flushline("</metalink>",cartFile); cartFile.close()
-      os.rename(cartPart,cartName); arcpy.AddMessage(cartName)
-      summary = "Missed %s" % missed
-      if opMode["Full"]: summary = "Downloaded %s, Skipped %s, Failed %s, %s" % (dldone,dlskipped,dlfailed, summary)
-      arcpy.AddMessage(summary)
-    for on in self.outNames: params[self.i[on+"_"]].value = ";".join(out[on])
-
+              tileDir = os.path.join(rasterDir, Title, tileName)
+              if not os.path.exists(tileDir): os.makedirs(tileDir)
+              any = {"downloaded":False}
+              for on in self.plainFileBased: any[on]=False
+              for n,dn in self.images.iteritems():
+                if params[self.i[n]].value:
+                  i = self.imgNames.index(n)
+                  if n=="TCI" and PSD13: arcpy.AddWarning("  %s: not available for older products (PSD<14)."%n)
+                  elif n=="B10" and L2A: pass #arcpy.AddWarning("  %s: not available for L2A products."%n)
+                  elif i<14 or L2A:
+                    arcpy.AddMessage("  %s" % n)
+                    pathFormat = tiles[tileName]
+                    imgPath = sensub.imgPath(pathFormat, n, procBaseline, L2A, dn)
+                    if L2A: imgPath=sensub.plain2nodes(imgPath) # Catch-up.
+                    imgFull,issue,severity = sensub.download(urlFormat % imgPath, tileDir, n+".jp2")
+                    if not issue or (issue=="already exists" and imgFull is not None):
+                      for on in self.plainFileBased:
+                        if not any[on] and ((not L2A and on=="TCI1C" and n=="TCI") or (L2A and n.startswith(on))):
+                          out[on].append(imgFull); any[on]=True; break # Highest resolution rules.
+                      if not issue: any["downloaded"]=True
+              if any["downloaded"]:
+                r[4]=datetime.datetime.now(); update=True
+          if update: rows.updateRow(r)
+      if not opMode["ImgSel"]:
+        sensub.flushline("</metalink>",cartFile); cartFile.close()
+        os.rename(cartPart,cartName); arcpy.AddMessage(cartName)
+        summary = "Missed %s" % missed
+        if opMode["Full"]: summary = "Downloaded %s, Skipped %s, Failed %s, %s" % (dldone,dlskipped,dlfailed, summary)
+        arcpy.AddMessage(summary)
+      for on in self.outNames: params[self.i[on+"_"]].value = ";".join(out[on])
+    finally:
+      if toRestore:
+        for lyr in toRestore: lyr.visible=True
+        arcpy.RefreshTOC(); arcpy.RefreshActiveView()
+ 
