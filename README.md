@@ -45,7 +45,7 @@ CLD+SNW+BOA of the lower product on the right.")
 * Valid login credentials for DHuS at either one of the following
     * Copernicus Open Access Hub: https://scihub.copernicus.eu/dhus/#/self-registration
     * CODE-DE site: https://code-de.org/dhus/#/self-registration
-* Tested with ArcMap/ArcCatalog version 10.4.1, 10.5, 10.5.1, 10.6 (not suitable for ArcGIS Pro until further notice).
+* Tested with ArcMap/ArcCatalog version 10.4.1, 10.5, 10.5.1, 10.6, 10.6.1 (not suitable for ArcGIS Pro until further notice).
 * Regarding ArcMap 10.4.1:
   * [ArcGIS 10.4.1 Raster Patch](http://support.esri.com/Products/Desktop/arcgis-desktop/arcmap/10-4-1#downloads?id=7396).
   * On affected systems: [ArcGIS Runtime Error R6034 Patch](http://support.esri.com/download/7391).
