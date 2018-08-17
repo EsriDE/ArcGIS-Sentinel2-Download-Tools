@@ -15,9 +15,9 @@
 # limitations under the License.
 
 """Common utilities & helper functions for Sentinel geoprocessing tools."""
-VERSION=20180622
+VERSION=20180817
 ROWSSTEP=100 # Ultimate DHuS pagination page size limit (rows per page).
-AWS="http://sentinel-s2-l1c.s3.amazonaws.com/"
+#AWS="http://sentinel-s2-l1c.s3.amazonaws.com/"
 AOIDEMO="7.58179313821144 51.93624645888022 7.642306784531163 51.968128265779484" # Münster.
 PARTIAL=".partial"
 import os,urllib2,json,datetime,time,re
@@ -118,23 +118,24 @@ def prodTiles (Title, UUID, Sensing, preview=True, L2A=None, procBaseline=None):
   """Resolve product's tile(s) image path(s)."""
   if L2A is None: L2A=isL2A(Title)
   if procBaseline is None: procBaseline=baselineNumber(Title)
-  if L2A:
-    if not preview: return useDHuS(Title, UUID, preview, L2A, procBaseline) # Currently, AWS does not provide any L2A images.
-    elif procBaseline>"0206": return useDHuS(Title, UUID, preview, L2A, procBaseline) # Now provides a proper BOA preview.
-    # Any pilot phase L2A product (<="0206") doesn't come with a properly(!) georeferenced BOA preview, therefore the corresponding L1C (TOA) preview must then be used.
-  try:
-    url = "%sproducts/%d/%d/%d/%s/productInfo.json" % (AWS, Sensing.year,Sensing.month,Sensing.day, Title.replace("L2A_","L1C_",1))
-    info = json.load(urllib2.urlopen(url))
-    imgName = "preview" if preview else "%s"
-    tiles = dict()
-    for t in info["tiles"]: tiles["%d%s%s" % (t["utmZone"], t["latitudeBand"], t["gridSquare"])] = "%s/%s.jp2" % (t["path"], imgName)
-    urlFormat = AWS+"%s"
-  except urllib2.HTTPError as err:
-    if err.code==404: # Why are some product paths not valid? For example: products/2016/7/20/S2A_OPER_PRD_MSIL1C_PDMC_20160805T152827_R051_V20160720T105547_20160720T105547/productInfo.json
-      notify("%s: Missing product info on AWS, using DHuS as fallback..."%Title, 1)
-      tiles,urlFormat = useDHuS(Title, UUID, preview, L2A, procBaseline)
-    else: raise
-  return tiles,urlFormat
+  return useDHuS(Title, UUID, preview, L2A, procBaseline) # Since public access on the AWS bucket was disabled on 7th of August 2018, now generally use DHuS!
+#  if L2A:
+#    if not preview: return useDHuS(Title, UUID, preview, L2A, procBaseline) # Currently, AWS does not provide any L2A images.
+#    elif procBaseline>"0206": return useDHuS(Title, UUID, preview, L2A, procBaseline) # Now provides a proper BOA preview.
+#    # Any pilot phase L2A product (<="0206") doesn't come with a properly(!) georeferenced BOA preview, therefore the corresponding L1C (TOA) preview must then be used.
+#  try:
+#    url = "%sproducts/%d/%d/%d/%s/productInfo.json" % (AWS, Sensing.year,Sensing.month,Sensing.day, Title.replace("L2A_","L1C_",1))
+#    info = json.load(urllib2.urlopen(url))
+#    imgName = "preview" if preview else "%s"
+#    tiles = dict()
+#    for t in info["tiles"]: tiles["%d%s%s" % (t["utmZone"], t["latitudeBand"], t["gridSquare"])] = "%s/%s.jp2" % (t["path"], imgName)
+#    urlFormat = AWS+"%s"
+#  except urllib2.HTTPError as err:
+#    if err.code==404: # Why are some product paths not valid? For example: products/2016/7/20/S2A_OPER_PRD_MSIL1C_PDMC_20160805T152827_R051_V20160720T105547_20160720T105547/productInfo.json
+#      notify("%s: Missing product info on AWS, using DHuS as fallback..."%Title, 1)
+#      tiles,urlFormat = useDHuS(Title, UUID, preview, L2A, procBaseline)
+#    else: raise
+#  return tiles,urlFormat
 
 
 def catch500 (url):
